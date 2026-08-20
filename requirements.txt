@@ -1,0 +1,9 @@
+mediapipe>=0.10.14,<0.11
+opencv-python>=4.8.0
+PyQt6>=6.6.0
+pyobjc-framework-Quartz>=10.0
+pyobjc-framework-Cocoa>=10.0
+pyobjc-core>=10.0
+pyautogui>=0.9.54
+numpy>=1.24.0
+Pillow>=10.0.0
