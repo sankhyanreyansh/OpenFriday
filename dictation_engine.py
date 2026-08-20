@@ -16,14 +16,12 @@ class VoiceDictationEngine:
 
     def __init__(self, model_size="base.en"):
         # Load model with int8 quantization for near-instant Apple Silicon inference
-        print(f"[DICTATION] Initializing WhisperModel ({model_size})...")
         self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
         self.sample_rate = 16000
         self.audio_frames = []
         self.is_recording = False
         self.stream = None
         self.lock = threading.Lock()
-        print("[DICTATION] WhisperModel initialized and ready.")
 
     def _audio_callback(self, indata, frames, time_info, status):
         if self.is_recording:
@@ -45,9 +43,7 @@ class VoiceDictationEngine:
                 callback=self._audio_callback
             )
             self.stream.start()
-            print("[DICTATION] Started Listening...")
         except Exception as e:
-            print(f"[DICTATION] Error starting audio stream: {e}")
             with self.lock:
                 self.is_recording = False
 
@@ -63,8 +59,8 @@ class VoiceDictationEngine:
             try:
                 self.stream.stop()
                 self.stream.close()
-            except Exception as e:
-                print(f"[DICTATION] Error stopping audio stream: {e}")
+            except Exception:
+                pass
             self.stream = None
 
         # Run transcription in a background thread to prevent UI freezing
@@ -83,20 +79,18 @@ class VoiceDictationEngine:
                 on_complete_callback("")
             return
 
-        print("[DICTATION] Transcribing locally...")
         try:
             segments, _ = self.model.transcribe(audio_data, beam_size=2, language="en")
             text = " ".join([seg.text for seg in segments]).strip()
-        except Exception as e:
-            print(f"[DICTATION] Transcription error: {e}")
+        except Exception:
             text = ""
 
         if text:
-            print(f"[DICTATION] Recognized: \"{text}\"")
             self._inject_text(text)
 
         if on_complete_callback:
             on_complete_callback(text)
+
 
     def _inject_text(self, text: str):
         """Injects text into active search bar / text field via clipboard paste."""

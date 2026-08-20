@@ -25,6 +25,7 @@ class GestureState(Enum):
     SWIPE_NAV = "SWIPE NAV"
     LISTENING = "LISTENING"
     TRANSCRIBING = "TRANSCRIBING"
+    RADIAL_MENU = "RADIAL MENU"
 
 
 class GestureData:
@@ -46,6 +47,7 @@ class GestureData:
         status_message: str = "Ready",
         is_modifier_active: bool = False,
         nav_action: Optional[str] = None,
+        radial_sector: Optional[str] = None,
     ):
         self.raw_x = raw_x
         self.raw_y = raw_y
@@ -61,10 +63,11 @@ class GestureData:
         self.status_message = status_message
         self.is_modifier_active = is_modifier_active
         self.nav_action = nav_action
+        self.radial_sector = radial_sector
 
 
 class GestureRecognizer:
-    """Analyzes 3D MediaPipe landmarks with robust two-finger scroll and dual-hand modifier mechanics."""
+    """Analyzes 3D MediaPipe landmarks with robust two-finger scroll, dual-hand modifier, and radial shortcut wheel."""
 
     # Landmark indices
     WRIST = 0
@@ -137,6 +140,21 @@ class GestureRecognizer:
         self.is_fist_active: bool = False
         self.FIST_HOLD_THRESHOLD: float = 0.5  # 500ms continuous hold required
 
+        # GTA-Style Radial Shortcut Wheel (Dual Open Palms)
+        self.dual_open_start_time: Optional[float] = None
+        self.is_radial_active: bool = False
+        self.DUAL_OPEN_HOLD_THRESHOLD: float = 0.25  # 250ms continuous hold required
+        self.screen_center: Tuple[float, float] = (1470.0 / 2.0, 956.0 / 2.0)
+
+    def set_screen_dimensions(self, width: float, height: float):
+        """Sets the screen center coordinates for radial wheel calculations."""
+        self.screen_center = (width / 2.0, height / 2.0)
+
+    def dismiss_radial_menu(self):
+        """Manually dismisses the radial menu modal state."""
+        self.is_radial_active = False
+        self.dual_open_start_time = None
+
     def _euclidean_dist(self, p1, p2) -> float:
         dx = p1.x - p2.x
         dy = p1.y - p2.y
@@ -162,12 +180,31 @@ class GestureRecognizer:
         pip_dist = self._euclidean_dist(landmarks[pip_idx], wrist)
         return tip_dist <= pip_dist * 1.15
 
+    def _is_hand_fully_open(self, landmarks) -> bool:
+        """Returns True if all 5 fingers of the hand are extended."""
+        if landmarks is None or len(landmarks) < 21:
+            return False
+        wrist = landmarks[self.WRIST]
+        thumb_ext = self._euclidean_dist(landmarks[self.THUMB_TIP], wrist) > self._euclidean_dist(landmarks[self.THUMB_MCP], wrist) * 1.10
+        idx_ext = (landmarks[self.INDEX_TIP].y < landmarks[self.INDEX_PIP].y) or (
+            self._euclidean_dist(landmarks[self.INDEX_TIP], wrist) > self._euclidean_dist(landmarks[self.INDEX_PIP], wrist) * 1.08
+        )
+        mid_ext = (landmarks[self.MIDDLE_TIP].y < landmarks[self.MIDDLE_PIP].y) or (
+            self._euclidean_dist(landmarks[self.MIDDLE_TIP], wrist) > self._euclidean_dist(landmarks[self.MIDDLE_PIP], wrist) * 1.08
+        )
+        ring_ext = (landmarks[self.RING_TIP].y < landmarks[self.RING_PIP].y) or (
+            self._euclidean_dist(landmarks[self.RING_TIP], wrist) > self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.08
+        )
+        pinky_ext = (landmarks[self.PINKY_TIP].y < landmarks[self.PINKY_PIP].y) or (
+            self._euclidean_dist(landmarks[self.PINKY_TIP], wrist) > self._euclidean_dist(landmarks[self.PINKY_PIP], wrist) * 1.08
+        )
+        return thumb_ext and idx_ext and mid_ext and ring_ext and pinky_ext
+
     def _is_left_hand_fist(self, left_landmarks) -> bool:
         """Returns True if all 4 fingers of the left hand are curled into a fist for Push-to-Talk."""
         if left_landmarks is None or len(left_landmarks) < 21:
             return False
         wrist = left_landmarks[self.WRIST]
-        # Check Index, Middle, Ring, Pinky
         for tip_idx, pip_idx in [
             (self.INDEX_TIP, self.INDEX_PIP),
             (self.MIDDLE_TIP, self.MIDDLE_PIP),
@@ -213,17 +250,100 @@ class GestureRecognizer:
         is_left_hand_present: bool = False,
         now: Optional[float] = None,
         left_landmarks: Optional[List[Any]] = None,
-    ) -> Tuple[GestureState, float, int, str, Tuple[float, float], Optional[str]]:
+    ) -> Tuple[GestureState, float, int, str, Tuple[float, float], Optional[str], Optional[str]]:
         """
-        Processes dominant hand landmarks, screen position, and modifier presence with strict role isolation.
+        Processes dominant hand landmarks, screen position, and modifier presence with strict 5-tier hierarchy.
         Returns:
-            (gesture_state, pinch_progress, scroll_dy, status_message, effective_screen_pos, nav_action)
+            (gesture_state, pinch_progress, scroll_dy, status_message, effective_screen_pos, nav_action, radial_sector)
         """
         if now is None:
             now = time.time()
 
         # =========================================================================
-        # 1. EVALUATE LEFT HAND (Strictly Binary: Open Modifier vs. Closed Fist PTT)
+        # PRIORITY 1: DUAL OPEN PALMS (RADIAL MENU SUMMON & STICKY MODAL STATE)
+        # =========================================================================
+        # 1A. If already active: LOCKED OPEN MODAL (never auto-close when hands move or drop)
+        if self.is_radial_active:
+            if landmarks is None or len(landmarks) < 21:
+                # Hands lowered / out of frame -> radial menu stays visible and locked open!
+                return GestureState.RADIAL_MENU, 0.0, 0, "Radial Wheel Active", screen_pos, None, None
+
+            sx, sy = screen_pos
+            cx, cy = self.screen_center
+            dx = sx - cx
+            dy = sy - cy
+            dist = math.hypot(dx, dy)
+            palm_scale = self._get_palm_scale(landmarks)
+
+            # Strict radial bounds (inner deadzone 45px, outer limit 160px)
+            R_INNER = 45.0
+            R_OUTER = 160.0
+
+            active_sector = None
+            if R_INNER <= dist <= R_OUTER:
+                deg = math.degrees(math.atan2(dy, dx))
+                if -45.0 <= deg <= 45.0:
+                    active_sector = "NEW_TAB"
+                elif 45.0 < deg <= 135.0:
+                    active_sector = "ESCAPE"
+                elif -135.0 <= deg < -45.0:
+                    active_sector = "ENTER"
+                else:
+                    active_sector = "CLOSE_TAB"
+
+            # Check Right Hand Pinch Tap for selection (< 250ms tap)
+            thumb_tip = landmarks[self.THUMB_TIP]
+            index_tip = landmarks[self.INDEX_TIP]
+            d_pinch = self._euclidean_dist(index_tip, thumb_tip) / palm_scale
+
+            pinch_contact = d_pinch < self.pinch_start_threshold
+
+            if not self.is_pinching:
+                if pinch_contact:
+                    self.is_pinching = True
+                    self.pinch_start_time = now
+            else:
+                if d_pinch > self.pinch_release_threshold:
+                    self.is_pinching = False
+                    pinch_dur = now - self.pinch_start_time
+                    if pinch_dur < self.tap_max_time:
+                        # Pinch tap completed -> dismiss modal state
+                        self.is_radial_active = False
+
+                        # 1. Inside valid sector: Execute corresponding shortcut
+                        if R_INNER <= dist <= R_OUTER and active_sector is not None:
+                            nav_action = active_sector
+                            return GestureState.RADIAL_MENU, 0.0, 0, f"Executed {nav_action}", screen_pos, nav_action, active_sector
+                        else:
+                            # 2. Outside wheel or in deadzone: Dismiss without action
+                            return GestureState.POINTING, 0.0, 0, "Radial Wheel Dismissed", screen_pos, None, None
+
+            return GestureState.RADIAL_MENU, (1.0 if self.is_pinching else 0.0), 0, f"Radial: {active_sector or 'Neutral'}", screen_pos, None, active_sector
+
+        # 1B. Dual Open Palms Detection (Charge for 250ms & suppress all other gestures)
+        if left_landmarks is not None and landmarks is not None:
+            is_left_open = self._is_hand_fully_open(left_landmarks)
+            is_right_open = self._is_hand_fully_open(landmarks)
+            if is_left_open and is_right_open:
+                if self.dual_open_start_time is None:
+                    self.dual_open_start_time = now
+                if (now - self.dual_open_start_time) >= self.DUAL_OPEN_HOLD_THRESHOLD:
+                    self.is_radial_active = True
+                    self.reset_pinch_states()
+                    return GestureState.RADIAL_MENU, 0.0, 0, "Radial Menu Opened", screen_pos, None, None
+                else:
+                    # While charging dual open palms, SUPPRESS all lower priority gestures (scroll, clicks, drags)
+                    self.reset_pinch_states()
+                    self.prev_scroll_y = None
+                    self.scroll_accumulator = 0.0
+                    return GestureState.POINTING, 0.0, 0, "Charging Radial Menu...", screen_pos, None, None
+            else:
+                self.dual_open_start_time = None
+        else:
+            self.dual_open_start_time = None
+
+        # =========================================================================
+        # PRIORITY 3: LEFT-HAND FIST (PUSH-TO-TALK VOICE DICTATION)
         # =========================================================================
         is_left_fist = False
         is_left_extended = False
@@ -244,34 +364,29 @@ class GestureRecognizer:
                 self.reset_pinch_states()
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None
             else:
-                # Fist held but hasn't reached 500ms threshold yet; block modifiers
                 is_left_extended = False
         else:
-            # Left hand is no longer a fist
             self.fist_start_time = None
             self.is_fist_active = False
 
         # =========================================================================
-        # 2. IF NO RIGHT HAND IN FRAME: STOP HERE (Zero cursor, clicks, or pinches)
+        # NO RIGHT HAND CHECK (Zero cursor, clicks, or pinches)
         # =========================================================================
         if landmarks is None or len(landmarks) < 21:
             self.reset_right_hand_states()
             if is_left_fist and self.is_fist_active:
-                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None
             elif is_left_fist:
-                return GestureState.NONE, 0.0, 0, "Left Fist (Hold for Voice)...", screen_pos, None
+                return GestureState.NONE, 0.0, 0, "Left Fist (Hold for Voice)...", screen_pos, None, None
             elif is_left_extended:
-                return GestureState.NONE, 0.0, 0, "[SHIFT] Modifier Ready (Show Right Hand)", screen_pos, None
+                return GestureState.NONE, 0.0, 0, "[SHIFT] Modifier Ready (Show Right Hand)", screen_pos, None, None
             else:
-                return GestureState.NONE, 0.0, 0, "Searching for Right Hand...", screen_pos, None
-
+                return GestureState.NONE, 0.0, 0, "Searching for Right Hand...", screen_pos, None, None
 
         # Modifier is active only when Left Hand is extended and NOT a fist
         is_modifier_active = is_left_extended and not is_left_fist
-
-
 
         palm_scale = self._get_palm_scale(landmarks)
         sx, sy = screen_pos
@@ -305,6 +420,11 @@ class GestureRecognizer:
             (landmarks[self.RING_TIP].y < landmarks[self.RING_PIP].y) or
             (self._euclidean_dist(landmarks[self.RING_TIP], wrist) > self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.08)
         )
+        is_ring_curled = (
+            self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP) or
+            (landmarks[self.RING_TIP].y > landmarks[self.RING_PIP].y) or
+            (self._euclidean_dist(landmarks[self.RING_TIP], wrist) <= self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.15)
+        )
         is_pinky_curled = (
             self._is_finger_curled(landmarks, self.PINKY_TIP, self.PINKY_PIP) or
             (landmarks[self.PINKY_TIP].y > landmarks[self.PINKY_PIP].y) or
@@ -312,7 +432,7 @@ class GestureRecognizer:
         )
 
         # =========================================================================
-        # STEP 1: STRICT 3-FINGER SPATIAL NAVIGATION (Index + Middle + Ring Extended, Pinky Curled)
+        # PRIORITY 2: 3-FINGER SPATIAL NAVIGATION (Index + Middle + Ring Extended, Pinky Curled)
         # =========================================================================
         is_three_finger = (not is_left_fist) and is_index_extended and is_middle_extended and is_ring_extended and is_pinky_curled
 
@@ -339,40 +459,34 @@ class GestureRecognizer:
                 abs_dy = abs(dy)
 
                 # 1. Horizontal Swipe Check (Space Switch)
-                # If |ΔX| > 0.08 and |ΔX| > 1.4 * |ΔY|
                 if abs_dx > 0.08 and abs_dx > 1.4 * abs_dy:
                     if dx < 0:
-                        # Hand moved Left -> trigger switch_space_right() (moves to Right space)
                         nav_action = "SPACE_RIGHT"
                         status_msg = "Swipe Left ➔ Space Right"
                     else:
-                        # Hand moved Right -> trigger switch_space_left() (moves to Left space)
                         nav_action = "SPACE_LEFT"
                         status_msg = "Swipe Right ➔ Space Left"
-                    print(f"[SWIPE DETECTED] Triggering action: {nav_action} (dx={dx:.3f}, dy={dy:.3f})")
                     self.last_swipe_time = now
                     self.three_finger_history.clear()
 
                 # 2. Vertical Swipe Up Check (Mission Control)
-                # If ΔY < -0.07 (upward in image coordinates) and |ΔY| > 1.3 * |ΔX|
                 elif dy < -0.07 and abs_dy > 1.3 * abs_dx:
                     nav_action = "MISSION_CONTROL"
                     status_msg = "Swipe Up ➔ Mission Control"
-                    print(f"[SWIPE DETECTED] Triggering action: {nav_action} (dx={dx:.3f}, dy={dy:.3f})")
                     self.last_swipe_time = now
                     self.three_finger_history.clear()
 
-            return GestureState.SWIPE_NAV, 0.0, 0, status_msg, screen_pos, nav_action
+
+            return GestureState.SWIPE_NAV, 0.0, 0, status_msg, screen_pos, nav_action, None
 
         self.three_finger_history.clear()
 
         # =========================================================================
-        # STEP 2: STRICT TWO-FINGER SCROLL CHECK (Index + Middle Extended, Ring Curled)
+        # PRIORITY 4: STRICT TWO-FINGER SCROLL (Index + Middle Extended, Ring AND Pinky Curled)
         # =========================================================================
-        is_two_finger = is_index_extended and is_middle_extended
+        is_two_finger = is_index_extended and is_middle_extended and is_ring_curled and is_pinky_curled
 
         if is_two_finger:
-            # Force mode to SCROLL ONLY, completely bypassing all pinch/click detection
             self.reset_pinch_states()
 
             if is_modifier_active:
@@ -380,8 +494,6 @@ class GestureRecognizer:
                 scroll_dy = 0
 
                 if self.prev_scroll_y is not None:
-                    # Moving hand UP (curr_y < prev_scroll_y) -> delta_y > 0 (Scroll UP)
-                    # Moving hand DOWN (curr_y > prev_scroll_y) -> delta_y < 0 (Scroll DOWN)
                     delta_y = (self.prev_scroll_y - curr_y) * 140.0 * self.scroll_sensitivity
                     self.scroll_accumulator += delta_y
                     if abs(self.scroll_accumulator) >= 1.0:
@@ -396,19 +508,20 @@ class GestureRecognizer:
                 else:
                     status_msg = "[SHIFT] Scroll Active (Move Up/Down)"
 
-                return GestureState.SCROLLING, 0.0, scroll_dy, status_msg, screen_pos, None
+                return GestureState.SCROLLING, 0.0, scroll_dy, status_msg, screen_pos, None, None
             else:
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None
+                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None, None
 
         self.prev_scroll_y = None
         self.scroll_accumulator = 0.0
 
         # =========================================================================
-        # STEP 3: PINCH & CLICK DETECTION (Requires Middle Finger Curled)
+        # PRIORITY 5: 1-FINGER POINTING & PINCH CLICK DETECTION (Middle Finger Curled)
         # =========================================================================
         middle_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP)
+
 
         thumb_tip = landmarks[self.THUMB_TIP]
         index_tip = landmarks[self.INDEX_TIP]
@@ -433,7 +546,6 @@ class GestureRecognizer:
             index_thumb_min_dist < self.pinch_start_threshold or
             (is_stationary_knuckle and index_thumb_min_dist < (self.pinch_start_threshold * 1.15))
         )
-
 
         if not self.is_pinching:
             if pinch_intent:
@@ -511,8 +623,7 @@ class GestureRecognizer:
                         status_msg = "[SHIFT] Right Pinch Locked"
                     effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
 
-        return current_action, pinch_progress, 0, status_msg, effective_pos, None
-
+        return current_action, pinch_progress, 0, status_msg, effective_pos, None, None
 
     def reset_pinch_states(self):
         self.is_pinching = False
@@ -531,5 +642,8 @@ class GestureRecognizer:
         self.reset_right_hand_states()
         self.fist_start_time = None
         self.is_fist_active = False
+        self.dual_open_start_time = None
+        self.is_radial_active = False
+
 
 

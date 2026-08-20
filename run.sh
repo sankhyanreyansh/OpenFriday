@@ -29,6 +29,7 @@ if [ ! -f "$VENV_PATH/bin/python" ]; then
     exit 1
 fi
 
-echo "Starting FRIDAY..."
 export PYTHONUNBUFFERED=1
 exec "$VENV_PATH/bin/python" "$SCRIPT_DIR/main.py" "$@"
+
+

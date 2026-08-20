@@ -26,8 +26,17 @@ Control your entire Mac using natural hand and finger gestures from your webcam.
   - Multi-hand identity tracking matches hands frame-to-frame based on Euclidean distance to previous palm centroids.
   - Hands touching, crossing, or moving close to each other in frame will **never swap identities** or drop tracking.
 
+- **GTA-Style Radial Shortcut Wheel**:
+  - 🖐️🖐️ **Dual Open Palms (Hold 300ms)**: Pops up a sleek, high-contrast monochrome glassmorphic radial shortcut wheel directly at the center of your screen.
+  - **4 Radial Quadrants & macOS System Shortcuts**:
+    - ⬆️ **TOP**: `ENTER` (Simulates Return key ↵)
+    - ➡️ **RIGHT**: `NEW TAB` (Simulates `⌘ + T`)
+    - ⬅️ **LEFT**: `CLOSE TAB` (Simulates `⌘ + W`)
+    - ⬇️ **BOTTOM**: `ESCAPE` (Simulates Escape key ⎋)
+  - **Interaction**: Move your right hand in the direction of the desired sector to highlight it, and **Pinch Tap** (<250ms) to trigger the shortcut with an instant shockwave ripple effect.
+
 - **Subdued Minimalist Glassmorphic HUD**:
-  - **Status Pill**: A compact, non-intrusive acrylic pill floating in the top-right corner (`rgba(24, 24, 27, 0.85)` with 1px soft border) showing live state (`POINTING`, `CLICK`, `DRAGGING`, `RIGHT-CLICK`, `SCROLLING`, `SPACES`, `LISTENING...`), modifier presence (`● [SHIFT]`), and pause toggle.
+  - **Status Pill**: A compact, non-intrusive acrylic pill floating in the top-right corner (`rgba(24, 24, 27, 0.85)` with 1px soft border) showing live state (`POINTING`, `CLICK`, `DRAGGING`, `RIGHT-CLICK`, `SCROLLING`, `SPACES`, `RADIAL MENU`, `LISTENING...`), modifier presence (`● [SHIFT]`), and pause toggle.
 
 ---
 
@@ -54,6 +63,8 @@ Control your entire Mac using natural hand and finger gestures from your webcam.
 | **Space Left** | 🖐️ 3 Fingers extended (Index, Middle, Ring) → Swipe Right | Switch to Desktop Space on Left (`Ctrl+Left`) |
 | **Mission Control** | 🖐️ 3 Fingers extended (Index, Middle, Ring) → Swipe Up | Open/Close Mission Control (`Ctrl+Up`) |
 | **Voice Dictation** | ✊ **Left Hand Fist** (Hold while speaking, release to type) | Push-to-Talk speech-to-text via `faster-whisper` |
+| **Radial Shortcuts** | 🖐️🖐️ **Dual Open Palms** (Hold 300ms) → Point & Pinch Tap | GTA-style wheel: **Enter**, **New Tab**, **Close Tab**, **Escape** |
+
 
 
 ---

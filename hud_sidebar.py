@@ -112,14 +112,23 @@ class GlassmorphicStatusPill(QWidget):
 
     def _reposition(self):
         screen = QGuiApplication.primaryScreen().geometry()
-        x = screen.x() + screen.width() - self.WINDOW_WIDTH - self.MARGIN
-        y = screen.y() + self.MARGIN
-        self.move(x, y)
+        
+        # Shift significantly further down and tighter to the right edge
+        margin_top = 56     # Moved significantly further down
+        margin_right = 4    # Moved significantly further right
+
+        x = screen.x() + screen.width() - self.width() - margin_right
+        y = screen.y() + margin_top
+
+        self.move(int(x), int(y))
 
     def showEvent(self, event):
         super().showEvent(event)
         self._reposition()
         permissions.setup_macos_fullscreen_overlay(self)
+
+
+
 
     def _build_ui(self):
         # 1. Root container with zero margins, perfectly centering the pill card
@@ -191,6 +200,14 @@ class GlassmorphicStatusPill(QWidget):
         elif data.state == GestureState.TRANSCRIBING:
             color = "#D4D4D8"
             display_text = "● TRANSCRIBING..."
+        elif data.state == GestureState.RADIAL_MENU:
+            color = "#E4E4E7"
+            if data.nav_action:
+                display_text = f"● {data.nav_action}"
+            elif getattr(data, 'radial_sector', None):
+                display_text = f"● {data.radial_sector}"
+            else:
+                display_text = "● RADIAL MENU"
         elif data.state == GestureState.SWIPE_NAV:
             color = "#E4E4E7"
             if data.nav_action == "MISSION_CONTROL":
@@ -206,7 +223,7 @@ class GlassmorphicStatusPill(QWidget):
 
         self.pill_status_lbl.setText(display_text)
 
-        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING):
+        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING, GestureState.RADIAL_MENU):
             color = "#E4E4E7"
         elif data.state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.TRANSCRIBING):
             color = "#D4D4D8"
@@ -216,6 +233,7 @@ class GlassmorphicStatusPill(QWidget):
             color = "#A1A1AA"
 
         self.pill_status_lbl.setStyleSheet(f"color: {color}; font-weight: 500; font-size: 12px;")
+
 
 
 

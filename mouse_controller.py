@@ -241,23 +241,35 @@ class MouseController:
 
     def switch_space_left(self):
         """Move to the Left desktop space (Control + Left Arrow)."""
-        print("[DISPATCH] Switching Space Left (Ctrl + Left Arrow)")
         threading.Thread(target=_run_system_keystroke, args=(123,), daemon=True).start()
 
     def switch_space_right(self):
         """Move to the Right desktop space (Control + Right Arrow)."""
-        print("[DISPATCH] Switching Space Right (Ctrl + Right Arrow)")
         threading.Thread(target=_run_system_keystroke, args=(124,), daemon=True).start()
 
     def trigger_mission_control(self):
         """Triggers Mission Control directly via macOS launch services."""
-        print("[DISPATCH] Triggering Mission Control")
         subprocess.Popen(["open", "-a", "Mission Control"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def trigger_shortcut(self, action: str):
+        """Dispatches keyboard shortcuts reliably on macOS."""
+        scripts = {
+            "ENTER": 'tell application "System Events" to key code 36',                         # Return
+            "NEW_TAB": 'tell application "System Events" to keystroke "t" using command down',  # Cmd + T
+            "CLOSE_TAB": 'tell application "System Events" to keystroke "w" using command down',# Cmd + W
+            "ESCAPE": 'tell application "System Events" to key code 53'                          # Escape
+        }
+        script = scripts.get(action)
+        if script:
+            subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 
     def release_all(self):
         """Safety release for any held mouse buttons."""
         if self.is_mouse_down:
             self.mouse_up()
+
 
 
 

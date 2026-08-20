@@ -28,114 +28,94 @@ def main():
     parser.add_argument("--no-sidebar", action="store_true", help="Disable glassmorphic HUD pill")
     args = parser.parse_args()
 
-    # 0. Configure macOS Accessory Activation Policy (Daemon / Agent mode)
-    permissions.set_macos_accessory_policy()
+    print("Initializing FRIDAY...")
 
-    QApplication.setApplicationName("FRIDAY")
-    QApplication.setOrganizationName("FRIDAY")
-    app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
+    try:
+        # 0. Configure macOS Accessory Activation Policy (Daemon / Agent mode)
+        permissions.set_macos_accessory_policy()
 
-    permissions.set_macos_accessory_policy()
+        QApplication.setApplicationName("FRIDAY")
+        QApplication.setOrganizationName("FRIDAY")
+        app = QApplication(sys.argv)
+        app.setQuitOnLastWindowClosed(False)
 
-    print("=" * 65)
-    print("🤖 Initializing FRIDAY (Minimalist Glassmorphic Controller)...")
-    print("=" * 65)
+        permissions.set_macos_accessory_policy()
 
-    # 1. Screen Detection
-    primary_screen = QGuiApplication.primaryScreen()
-    screen_geo = primary_screen.geometry()
-    print(f"🖥️  Display Detected: {screen_geo.width()}x{screen_geo.height()} (DPI Scale: {primary_screen.devicePixelRatio():.1f}x)")
+        # Permission Diagnostics (Trigger system prompt if not granted)
+        acc_ok = permissions.is_accessibility_granted()
+        if not acc_ok:
+            permissions.request_accessibility_permission()
 
-    # 2. Permission Diagnostics
-    acc_ok = permissions.is_accessibility_granted()
-    if not acc_ok:
-        print("⚠️  [NOTICE] macOS Accessibility permission is not yet granted.")
-        print("    FRIDAY requires Accessibility permissions to move the global mouse cursor.")
-        print("    Triggering system prompt now...")
-        permissions.request_accessibility_permission()
-    else:
-        print("✓ macOS Accessibility: Granted")
+        # 1. Initialize Controller & Windows
+        mouse_ctrl = MouseController()
+        hud_pill = GlassmorphicHUDPanel() if not args.no_sidebar else None
+        reticle_overlay = TransparentOverlay() if not args.no_overlay else None
 
-    cam_ok, cam_msg = permissions.check_camera_access()
-    if not cam_ok:
-        print(f"⚠️  [NOTICE] Camera check: {cam_msg}")
-    else:
-        print(f"✓ Camera Access: {cam_msg}")
+        # 2. Background Vision Engine
+        vision_thread = VisionEngine(camera_id=args.camera, mouse_controller=mouse_ctrl)
 
-    # 3. Initialize Controller & Windows
-    mouse_ctrl = MouseController()
-    hud_pill = GlassmorphicHUDPanel() if not args.no_sidebar else None
-    reticle_overlay = TransparentOverlay() if not args.no_overlay else None
-
-    # Background Vision Engine with hardcoded optimal constants
-    vision_thread = VisionEngine(camera_id=args.camera, mouse_controller=mouse_ctrl)
-
-    # 4. Wire Qt Signal Connections
-    if hud_pill:
-        vision_thread.gesture_updated.connect(hud_pill.update_gesture_data)
-        vision_thread.transcription_completed.connect(lambda txt: hud_pill.flash_transcribing())
-        hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
-
-    if reticle_overlay:
-        vision_thread.gesture_updated.connect(reticle_overlay.update_gesture_data)
-
-    # 5. macOS Menu Bar / System Tray
-    tray = QSystemTrayIcon()
-    tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
-    tray_menu = QMenu()
-
-    toggle_tracking_action = QAction("Pause / Resume Tracking", tray)
-    if hud_pill:
-        toggle_tracking_action.triggered.connect(hud_pill.on_master_toggle)
-    tray_menu.addAction(toggle_tracking_action)
-
-    tray_menu.addSeparator()
-
-    quit_action = QAction("Quit FRIDAY", tray)
-    quit_action.triggered.connect(app.quit)
-    tray_menu.addAction(quit_action)
-
-    tray.setContextMenu(tray_menu)
-    tray.show()
-
-    # 6. Start Background Vision Engine
-    vision_thread.start()
-
-    # 7. Show HUD Elements
-    if reticle_overlay:
-        reticle_overlay.show()
-        reticle_overlay.raise_()
-
-    if hud_pill:
-        hud_pill.show()
-        hud_pill.raise_()
-
-    print("=" * 65)
-    print("✓ FRIDAY is fully operational and visible on screen!")
-    if hud_pill:
-        print(f"  - Glassmorphic Status Pill: Visible={hud_pill.isVisible()}, Geo={hud_pill.geometry().width()}x{hud_pill.geometry().height()} at ({hud_pill.geometry().x()}, {hud_pill.geometry().y()})")
-    if reticle_overlay:
-        print(f"  - Click-Through Reticle Overlay: Visible={reticle_overlay.isVisible()}, Geo={reticle_overlay.geometry().width()}x{reticle_overlay.geometry().height()}")
-    print("  - Gestures: Right Pinch = Left Click | Pinch & Hold = Drag | Left Hand Extended + Pinch = Right Click | Left Hand Extended + 2 Fingers = Scroll | 3 Fingers Swipe = Spaces / Mission Control | Left Fist = Voice Dictation Push-to-Talk")
-    print("  - Press Ctrl+C in terminal or Quit in Menu Bar to exit.")
-    print("=" * 65)
-
-    def cleanup():
-        print("\nStopping FRIDAY...")
-        vision_thread.stop()
-        mouse_ctrl.release_all()
-        if reticle_overlay:
-            reticle_overlay.close()
+        # 3. Wire Qt Signal Connections
         if hud_pill:
-            hud_pill.close()
-        app.quit()
+            vision_thread.gesture_updated.connect(hud_pill.update_gesture_data)
+            vision_thread.transcription_completed.connect(lambda txt: hud_pill.flash_transcribing())
+            hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
 
-    signal.signal(signal.SIGINT, lambda sig, frame: cleanup())
-    signal.signal(signal.SIGTERM, lambda sig, frame: cleanup())
+        if reticle_overlay:
+            vision_thread.gesture_updated.connect(reticle_overlay.update_gesture_data)
+            reticle_overlay.dismiss_radial_requested.connect(vision_thread.dismiss_radial_menu)
 
-    sys.exit(app.exec())
+        # 4. macOS Menu Bar / System Tray
+        tray = QSystemTrayIcon()
+        tray.setIcon(app.style().standardIcon(app.style().StandardPixmap.SP_ComputerIcon))
+        tray_menu = QMenu()
+
+        toggle_tracking_action = QAction("Pause / Resume Tracking", tray)
+        if hud_pill:
+            toggle_tracking_action.triggered.connect(hud_pill.on_master_toggle)
+        tray_menu.addAction(toggle_tracking_action)
+
+        tray_menu.addSeparator()
+
+        quit_action = QAction("Quit FRIDAY", tray)
+        quit_action.triggered.connect(app.quit)
+        tray_menu.addAction(quit_action)
+
+        tray.setContextMenu(tray_menu)
+        tray.show()
+
+        # 5. Start Background Vision Engine
+        vision_thread.start()
+
+        # 6. Show HUD Elements
+        if reticle_overlay:
+            reticle_overlay.show()
+            reticle_overlay.raise_()
+
+        if hud_pill:
+            hud_pill.show()
+            hud_pill.raise_()
+
+        print("FRIDAY launched successfully.")
+
+        def cleanup():
+            vision_thread.stop()
+            mouse_ctrl.release_all()
+            if reticle_overlay:
+                reticle_overlay.close()
+            if hud_pill:
+                hud_pill.close()
+            app.quit()
+
+        signal.signal(signal.SIGINT, lambda sig, frame: cleanup())
+        signal.signal(signal.SIGTERM, lambda sig, frame: cleanup())
+
+        sys.exit(app.exec())
+
+    except Exception as e:
+        print(f"FRIDAY failed to launch: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+

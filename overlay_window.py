@@ -9,7 +9,7 @@ import time
 from typing import Optional, List, Tuple
 
 from PyQt6.QtWidgets import QWidget, QApplication
-from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import (
     QPainter,
     QColor,
@@ -58,6 +58,8 @@ class ClickRipple:
 class TransparentOverlay(QWidget):
     """Fullscreen transparent, click-through HUD reticle overlay with monochrome palette."""
 
+    dismiss_radial_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
 
@@ -98,6 +100,14 @@ class TransparentOverlay(QWidget):
             self.render_timer.stop()
         super().closeEvent(event)
 
+    def mousePressEvent(self, event):
+        """Physical mouse click closes the radial menu if open."""
+        if self.current_data and self.current_data.state == GestureState.RADIAL_MENU:
+            self.dismiss_radial_requested.emit()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
     def update_settings(self, settings: dict):
         """Updates overlay visual preferences."""
         if "show_reticle" in settings:
@@ -114,9 +124,21 @@ class TransparentOverlay(QWidget):
             self.ripples.append(ClickRipple(data.screen_x, data.screen_y, QColor(212, 212, 216), 50.0))
         elif data.state == GestureState.RIGHT_CLICK and self.prev_state != GestureState.RIGHT_CLICK:
             self.ripples.append(ClickRipple(data.screen_x, data.screen_y, QColor(212, 212, 216), 44.0))
+        elif data.state == GestureState.RADIAL_MENU and data.nav_action in ("ENTER", "NEW_TAB", "CLOSE_TAB", "ESCAPE"):
+            # Trigger shockwave ripple on shortcut selection
+            center_x = self.width() / 2.0
+            center_y = self.height() / 2.0
+            self.ripples.append(ClickRipple(center_x, center_y, QColor(255, 255, 255), 120.0, duration=0.35))
+
+        # Enable click listening while in radial menu to allow physical mouse clicks to dismiss it
+        if data.state == GestureState.RADIAL_MENU:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        else:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self.prev_state = data.state
         self.current_data = data
+
 
     def update_animation(self):
         """Advances reticle rotation and ripple timers, then repaints."""
@@ -132,8 +154,18 @@ class TransparentOverlay(QWidget):
         for ripple in self.ripples:
             ripple.draw(painter)
 
-        # 2. Draw Minimalist Monochrome Reticle if tracking is active
-        if self.current_data and self.current_data.is_tracking and self.show_reticle:
+        # 2. Draw GTA-Style Radial Shortcut Wheel if in RADIAL_MENU state
+        if self.current_data and self.current_data.state == GestureState.RADIAL_MENU:
+            cx = self.width() / 2.0
+            cy = self.height() / 2.0
+            active_sec = getattr(self.current_data, 'radial_sector', None)
+            cur_x = self.current_data.screen_x if self.current_data.is_tracking else cx
+            cur_y = self.current_data.screen_y if self.current_data.is_tracking else cy
+            pinch = self.current_data.pinch_progress
+            self._draw_radial_menu(painter, cx, cy, active_sec, cur_x, cur_y, pinch)
+
+        # 3. Draw Minimalist Monochrome Reticle if tracking is active
+        elif self.current_data and self.current_data.is_tracking and self.show_reticle:
             cx = self.current_data.screen_x
             cy = self.current_data.screen_y
             state = self.current_data.state
@@ -142,6 +174,134 @@ class TransparentOverlay(QWidget):
             self._draw_reticle(painter, cx, cy, state, pinch)
 
         painter.end()
+
+    def _draw_radial_menu(
+        self,
+        painter: QPainter,
+        cx: float,
+        cy: float,
+        active_sector: Optional[str],
+        cursor_x: float,
+        cursor_y: float,
+        pinch: float,
+    ):
+        """Draws a sleek, high-contrast monochrome GTA-style radial shortcut wheel at screen center."""
+        r_out = 160.0
+        r_in = 45.0
+
+        # 1. Soft Backdrop Glow
+        bg_glow = QRadialGradient(QPointF(cx, cy), r_out + 40)
+        bg_glow.setColorAt(0.0, QColor(0, 0, 0, 160))
+        bg_glow.setColorAt(0.7, QColor(0, 0, 0, 90))
+        bg_glow.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(bg_glow))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPointF(cx, cy), r_out + 40, r_out + 40)
+
+        # 2. Outer Subtle Rim
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(255, 255, 255, 25), 1.2))
+        painter.drawEllipse(QPointF(cx, cy), r_out + 2, r_out + 2)
+
+        # 3. 4 Radial Quadrants:
+        # RIGHT (⌘T / NEW TAB), TOP (↵ / ENTER), LEFT (⌘W / CLOSE TAB), BOTTOM (⎋ / ESCAPE)
+        sectors = [
+            ("NEW_TAB", "NEW TAB", "⌘T", -45, 90, 0),
+            ("ENTER", "ENTER", "↵", 45, 90, 90),
+            ("CLOSE_TAB", "CLOSE TAB", "⌘W", 135, 90, 180),
+            ("ESCAPE", "ESCAPE", "⎋", 225, 90, 270),
+        ]
+
+        for sec_id, label, sublabel, start_deg, sweep_deg, mid_deg in sectors:
+            is_active = (active_sector == sec_id)
+
+            path = QPainterPath()
+            path.arcMoveTo(cx - r_out, cy - r_out, r_out * 2, r_out * 2, start_deg)
+            path.arcTo(cx - r_out, cy - r_out, r_out * 2, r_out * 2, start_deg, sweep_deg)
+            path.arcTo(cx - r_in, cy - r_in, r_in * 2, r_in * 2, start_deg + sweep_deg, -sweep_deg)
+            path.closeSubpath()
+
+            if is_active:
+                # Subtle, Refined Zinc/Charcoal Gray Active Sector
+                painter.setBrush(QBrush(QColor(113, 113, 122, 110)))
+                painter.setPen(QPen(QColor(244, 244, 245, 230), 2.0))
+            else:
+                # Sleek Glassmorphic Inactive Sector
+                painter.setBrush(QBrush(QColor(18, 20, 26, 215)))
+                painter.setPen(QPen(QColor(255, 255, 255, 32), 1.0))
+
+            painter.drawPath(path)
+
+            # Draw Quadrant Symbols & Labels
+            rad = math.radians(mid_deg)
+            r_mid = 106.0
+            tx = cx + r_mid * math.cos(rad)
+            ty = cy - r_mid * math.sin(rad)
+
+            sym_color = QColor(244, 244, 245) if is_active else QColor(161, 161, 170, 200)
+            lbl_color = QColor(244, 244, 245) if is_active else QColor(140, 140, 150, 180)
+
+            # Shortcut Symbol
+            painter.setPen(sym_color)
+            sym_font = QFont("Helvetica Neue", 16, QFont.Weight.Bold if is_active else QFont.Weight.Medium)
+            painter.setFont(sym_font)
+            painter.drawText(QRectF(tx - 40, ty - 20, 80, 22), Qt.AlignmentFlag.AlignCenter, sublabel)
+
+            # Action Label
+            painter.setPen(lbl_color)
+            lbl_font = QFont("Helvetica Neue", 10, QFont.Weight.DemiBold if is_active else QFont.Weight.Normal)
+            lbl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+            painter.setFont(lbl_font)
+            painter.drawText(QRectF(tx - 50, ty + 2, 100, 18), Qt.AlignmentFlag.AlignCenter, label)
+
+
+
+        # 4. Center Deadzone Hub
+        painter.setBrush(QBrush(QColor(14, 16, 22, 245)))
+        painter.setPen(QPen(QColor(255, 255, 255, 45), 1.2))
+        painter.drawEllipse(QPointF(cx, cy), r_in, r_in)
+
+        # Center Label
+        painter.setPen(QColor(161, 161, 170, 180))
+        center_font = QFont("Helvetica Neue", 9, QFont.Weight.DemiBold)
+        center_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+        painter.setFont(center_font)
+        painter.drawText(QRectF(cx - 40, cy - 10, 80, 20), Qt.AlignmentFlag.AlignCenter, "SHORTCUTS")
+
+        # 5. Pointer Aim Line & Position Indicator
+        dx = cursor_x - cx
+        dy = cursor_y - cy
+        dist = math.hypot(dx, dy)
+
+        if dist > 5.0:
+            norm_x = dx / dist
+            norm_y = dy / dist
+            line_len = min(dist, r_out + 10)
+            end_x = cx + norm_x * line_len
+            end_y = cy + norm_y * line_len
+
+            aim_pen = QPen(QColor(255, 255, 255, 160 if active_sector else 70), 1.5)
+            aim_pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(aim_pen)
+            painter.drawLine(QPointF(cx, cy), QPointF(end_x, end_y))
+
+        # Aim Pointer Dot at Cursor
+        painter.setBrush(QBrush(QColor(255, 255, 255, 240)))
+        painter.setPen(QPen(QColor(255, 255, 255, 120), 1.0))
+        painter.drawEllipse(QPointF(cursor_x, cursor_y), 4.5, 4.5)
+
+        # Pinch Meter Ring during Pinch Tap
+        if pinch > 0.05:
+            pinch_r = 10.5
+            pinch_pen = QPen(QColor(255, 255, 255, 240), 2.0)
+            pinch_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pinch_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawArc(
+                QRectF(cursor_x - pinch_r, cursor_y - pinch_r, pinch_r * 2, pinch_r * 2),
+                90 * 16,
+                -int(pinch * 360) * 16
+            )
 
     def _draw_reticle(self, painter: QPainter, cx: float, cy: float, state: GestureState, pinch: float):
         """Draws subtle, minimalist monochrome HUD reticle at cursor position."""
@@ -201,3 +361,4 @@ class TransparentOverlay(QWidget):
             painter.drawLine(int(cx), int(cy - 21), int(cx + 4), int(cy - 16))
             painter.drawLine(int(cx - 4), int(cy + 16), int(cx), int(cy + 21))
             painter.drawLine(int(cx), int(cy + 21), int(cx + 4), int(cy + 16))
+

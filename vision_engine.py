@@ -142,6 +142,7 @@ class VisionEngine(QThread):
 
         # Screen dimensions
         self.screen_width, self.screen_height = self.mouse_controller.get_screen_size()
+        self.gesture_recognizer.set_screen_dimensions(self.screen_width, self.screen_height)
 
         # Previous state memory & Centroid Persistence
         self.prev_state = GestureState.NONE
@@ -159,6 +160,10 @@ class VisionEngine(QThread):
         """Dynamically updates vision and control parameters from GUI settings."""
         if "camera_id" in settings and settings["camera_id"] != self.camera_id:
             self.camera_id = int(settings["camera_id"])
+            if self.grabber:
+                self.grabber.stop()
+                self.grabber = CameraGrabber(self.camera_id)
+                self.grabber.start_capture()
         if "tracking_enabled" in settings:
             self.tracking_enabled = bool(settings["tracking_enabled"])
         if "mouse_control_enabled" in settings:
@@ -173,10 +178,14 @@ class VisionEngine(QThread):
             margin = float(settings["margin_y"])
             self.roi_y_min = margin
             self.roi_y_max = 1.0 - margin
-        if "min_cutoff" in settings or "beta" in settings:
-            cutoff = float(settings.get("min_cutoff", self.pointer_smoothing))
-            beta = float(settings.get("beta", self.pointer_beta))
+        if "smoothing" in settings:
+            cutoff = float(settings["smoothing"])
             self.pointer_smoothing = cutoff
+            beta = self.pointer_beta
+            self.filter.update_params(cutoff, beta)
+        if "responsiveness" in settings:
+            beta = float(settings["responsiveness"])
+            cutoff = self.pointer_smoothing
             self.pointer_beta = beta
             self.filter.update_params(cutoff, beta)
         if "pinch_threshold" in settings:
@@ -184,6 +193,10 @@ class VisionEngine(QThread):
             self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_threshold"]) + 0.14
         if "scroll_sensitivity" in settings:
             self.gesture_recognizer.scroll_sensitivity = float(settings["scroll_sensitivity"])
+
+    def dismiss_radial_menu(self):
+        """Dismisses the radial menu modal state."""
+        self.gesture_recognizer.dismiss_radial_menu()
 
     def stop(self):
         """Stops the vision thread safely."""
@@ -194,6 +207,7 @@ class VisionEngine(QThread):
         if self.grabber:
             self.grabber.stop()
         self.wait(2000)
+
 
     def _map_to_screen(self, norm_x: float, norm_y: float) -> Tuple[float, float]:
         """
@@ -310,7 +324,7 @@ class VisionEngine(QThread):
         alpha = 0.65
         self.prev_dominant_centroid = (
             alpha * centroids[right_idx][0] + (1 - alpha) * (self.prev_dominant_centroid[0] if self.prev_dominant_centroid else centroids[right_idx][0]),
-            alpha * centroids[right_idx][0] + (1 - alpha) * (self.prev_dominant_centroid[1] if self.prev_dominant_centroid else centroids[right_idx][1]),
+            alpha * centroids[right_idx][1] + (1 - alpha) * (self.prev_dominant_centroid[1] if self.prev_dominant_centroid else centroids[right_idx][1]),
         )
         self.prev_modifier_centroid = (
             alpha * centroids[left_idx][0] + (1 - alpha) * (self.prev_modifier_centroid[0] if self.prev_modifier_centroid else centroids[left_idx][0]),
@@ -396,7 +410,7 @@ class VisionEngine(QThread):
                         unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
                         filtered_sx, filtered_sy = self.filter.filter(unfiltered_sx, unfiltered_sy, now)
 
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action = self.gesture_recognizer.process(
+                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector = self.gesture_recognizer.process(
                             smoothed_landmarks,
                             (filtered_sx, filtered_sy),
                             left_landmarks=left_hand_landmarks,
@@ -423,6 +437,7 @@ class VisionEngine(QThread):
                             status_message=status_msg,
                             is_modifier_active=(left_hand_landmarks is not None),
                             nav_action=nav_action,
+                            radial_sector=radial_sector,
                         )
                     else:
                         # Right hand not in frame:
@@ -432,7 +447,7 @@ class VisionEngine(QThread):
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
 
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action = self.gesture_recognizer.process(
+                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector = self.gesture_recognizer.process(
                             None,
                             (0.0, 0.0),
                             left_landmarks=left_hand_landmarks,
@@ -454,6 +469,7 @@ class VisionEngine(QThread):
                             status_message=status_msg,
                             is_modifier_active=(left_hand_landmarks is not None),
                             nav_action=None,
+                            radial_sector=radial_sector,
                         )
 
                     # Handle Voice Dictation Push-to-Talk State Transitions
@@ -498,6 +514,15 @@ class VisionEngine(QThread):
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
+            return
+
+        # Radial Shortcut Menu (Freeze standard mouse actions & execute triggered shortcut)
+        if state == GestureState.RADIAL_MENU:
+            if self.was_dragging:
+                self.mouse_controller.mouse_up()
+                self.was_dragging = False
+            if nav_action in ("ENTER", "NEW_TAB", "CLOSE_TAB", "ESCAPE"):
+                self.mouse_controller.trigger_shortcut(nav_action)
             return
 
         # 3-Finger Spatial Navigation (Freeze cursor movement and clicks)
