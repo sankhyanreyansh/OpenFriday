@@ -27,7 +27,7 @@ from one_euro_filter import VelocityAdaptiveEMAFilter
 from gesture_recognizer import GestureRecognizer, GestureState, GestureData
 from mouse_controller import MouseController
 from dictation_engine import VoiceDictationEngine
-from gemini_assistant import GeminiAssistant
+from ai_assistant import AIAssistant
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
@@ -120,9 +120,9 @@ class VisionEngine(QThread):
         self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
         self.gesture_recognizer = GestureRecognizer()
         
-        # Local Voice Dictation Engine (faster-whisper) & Gemini Assistant
+        # Local Voice Dictation Engine (faster-whisper) & Local Ollama AI Assistant
         self.dictation_engine = VoiceDictationEngine(model_size="base.en")
-        self.gemini_assistant = GeminiAssistant()
+        self.ai_assistant = AIAssistant()
         self.is_dictating = False
         self.current_dictation_mode: str = "CLIPBOARD"
         
@@ -342,14 +342,14 @@ class VisionEngine(QThread):
         self.transcription_completed.emit(text)
 
     def _on_ai_status_change(self, status: str):
-        """Callback when Gemini Assistant changes status (THINKING, SPEAKING, IDLE)."""
+        """Callback when AI Assistant changes status (THINKING, SPEAKING, IDLE)."""
         self.ai_status_changed.emit(status)
 
     def _on_ai_transcription_complete(self, text: str):
         """Callback when local Whisper transcription completes for AI Assistant."""
         self.transcription_completed.emit(text)
         if text and text.strip():
-            self.gemini_assistant.query(text, on_status_change=self._on_ai_status_change)
+            self.ai_assistant.query(text, on_status_change=self._on_ai_status_change)
 
     def run(self):
         """Main vision processing loop with multi-hand classification and centroid persistence."""
