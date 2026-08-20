@@ -58,6 +58,7 @@ def main():
         if hud_pill:
             vision_thread.gesture_updated.connect(hud_pill.update_gesture_data)
             vision_thread.transcription_completed.connect(lambda txt: hud_pill.flash_transcribing())
+            vision_thread.ai_status_changed.connect(hud_pill.update_ai_status)
             hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
 
         if reticle_overlay:

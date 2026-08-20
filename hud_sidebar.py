@@ -159,6 +159,7 @@ class GlassmorphicStatusPill(QWidget):
         p_layout.addWidget(self.mini_pause_btn)
 
         self.is_flashing_transcribe = False
+        self.ai_status: Optional[str] = None
 
         root_layout.addWidget(self.pill_card)
 
@@ -184,17 +185,43 @@ class GlassmorphicStatusPill(QWidget):
     def _stop_flash_transcribing(self):
         self.is_flashing_transcribe = False
 
+    def update_ai_status(self, status: str):
+        """Updates status pill when Gemini AI is thinking or speaking."""
+        if status in ("THINKING", "SPEAKING"):
+            self.is_flashing_transcribe = False
+            self.ai_status = status
+            if status == "THINKING":
+                self.pill_status_lbl.setText("● THINKING...")
+                self.pill_status_lbl.setStyleSheet("color: #D4D4D8; font-weight: 500; font-size: 12px;")
+            elif status == "SPEAKING":
+                self.pill_status_lbl.setText("● FRIDAY SPEAKING...")
+                self.pill_status_lbl.setStyleSheet("color: #E4E4E7; font-weight: 500; font-size: 12px;")
+        else:
+            self.ai_status = None
+
     def update_gesture_data(self, data: GestureData):
-        """Updates live status indicator with dual-hand modifier and dictation state."""
+        """Updates live status indicator with dual-hand modifier, AI assistant, and dictation state."""
         if not self.is_tracking_active:
             return
 
         if self.is_flashing_transcribe:
             return
 
+        if self.ai_status == "THINKING":
+            self.pill_status_lbl.setText("● THINKING...")
+            self.pill_status_lbl.setStyleSheet("color: #D4D4D8; font-weight: 500; font-size: 12px;")
+            return
+        elif self.ai_status == "SPEAKING":
+            self.pill_status_lbl.setText("● FRIDAY SPEAKING...")
+            self.pill_status_lbl.setStyleSheet("color: #E4E4E7; font-weight: 500; font-size: 12px;")
+            return
+
         state_text = data.state.value
 
-        if data.state == GestureState.LISTENING:
+        if data.state == GestureState.AI_LISTENING:
+            color = "#E4E4E7"
+            display_text = "● ASKING FRIDAY..."
+        elif data.state == GestureState.LISTENING:
             color = "#E4E4E7"
             display_text = "● LISTENING..."
         elif data.state == GestureState.TRANSCRIBING:
@@ -223,7 +250,7 @@ class GlassmorphicStatusPill(QWidget):
 
         self.pill_status_lbl.setText(display_text)
 
-        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING, GestureState.RADIAL_MENU):
+        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING, GestureState.AI_LISTENING, GestureState.RADIAL_MENU):
             color = "#E4E4E7"
         elif data.state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.TRANSCRIBING):
             color = "#D4D4D8"

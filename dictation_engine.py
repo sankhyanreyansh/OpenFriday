@@ -47,7 +47,7 @@ class VoiceDictationEngine:
             with self.lock:
                 self.is_recording = False
 
-    def stop_and_transcribe(self, on_complete_callback=None):
+    def stop_and_transcribe(self, on_complete_callback=None, inject_clipboard: bool = True):
         with self.lock:
             if not self.is_recording:
                 return
@@ -64,9 +64,13 @@ class VoiceDictationEngine:
             self.stream = None
 
         # Run transcription in a background thread to prevent UI freezing
-        threading.Thread(target=self._process_transcription, args=(frames_copy, on_complete_callback), daemon=True).start()
+        threading.Thread(
+            target=self._process_transcription,
+            args=(frames_copy, on_complete_callback, inject_clipboard),
+            daemon=True
+        ).start()
 
-    def _process_transcription(self, frames, on_complete_callback):
+    def _process_transcription(self, frames, on_complete_callback, inject_clipboard: bool = True):
         if not frames:
             if on_complete_callback:
                 on_complete_callback("")
@@ -85,7 +89,7 @@ class VoiceDictationEngine:
         except Exception:
             text = ""
 
-        if text:
+        if text and inject_clipboard:
             self._inject_text(text)
 
         if on_complete_callback:

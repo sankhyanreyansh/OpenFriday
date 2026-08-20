@@ -8,3 +8,7 @@ __pycache__/
 .idea/
 .vscode/
 models/
+.env
+.env.*
+PROJECT_CONTEXT_SUMMARY.md
+scratch/

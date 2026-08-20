@@ -26,6 +26,7 @@ class GestureState(Enum):
     LISTENING = "LISTENING"
     TRANSCRIBING = "TRANSCRIBING"
     RADIAL_MENU = "RADIAL MENU"
+    AI_LISTENING = "AI LISTENING"
 
 
 class GestureData:
@@ -135,10 +136,15 @@ class GestureRecognizer:
         self.last_swipe_time: float = 0.0
         self.swipe_cooldown: float = 0.60
 
-        # Push-to-talk voice dictation fist hold debounce
+        # Push-to-talk voice dictation fist hold debounce (Single Left Fist)
         self.fist_start_time: Optional[float] = None
         self.is_fist_active: bool = False
         self.FIST_HOLD_THRESHOLD: float = 0.5  # 500ms continuous hold required
+
+        # Dual-Fist AI Assistant ("Ask FRIDAY") hold debounce
+        self.dual_fist_start_time: Optional[float] = None
+        self.is_dual_fist_active: bool = False
+        self.DUAL_FIST_HOLD_THRESHOLD: float = 0.4  # 400ms continuous hold required
 
         # GTA-Style Radial Shortcut Wheel (Dual Open Palms)
         self.dual_open_start_time: Optional[float] = None
@@ -200,27 +206,31 @@ class GestureRecognizer:
         )
         return thumb_ext and idx_ext and mid_ext and ring_ext and pinky_ext
 
-    def _is_left_hand_fist(self, left_landmarks) -> bool:
-        """Returns True if all 4 fingers of the left hand are curled into a fist for Push-to-Talk."""
-        if left_landmarks is None or len(left_landmarks) < 21:
+    def _is_hand_fist(self, landmarks) -> bool:
+        """Returns True if all 4 fingers (Index, Middle, Ring, Pinky) are curled into a fist."""
+        if landmarks is None or len(landmarks) < 21:
             return False
-        wrist = left_landmarks[self.WRIST]
+        wrist = landmarks[self.WRIST]
         for tip_idx, pip_idx in [
             (self.INDEX_TIP, self.INDEX_PIP),
             (self.MIDDLE_TIP, self.MIDDLE_PIP),
             (self.RING_TIP, self.RING_PIP),
             (self.PINKY_TIP, self.PINKY_PIP),
         ]:
-            tip = left_landmarks[tip_idx]
-            pip = left_landmarks[pip_idx]
+            tip = landmarks[tip_idx]
+            pip = landmarks[pip_idx]
             is_curled = (
-                self._is_finger_curled(left_landmarks, tip_idx, pip_idx) or
+                self._is_finger_curled(landmarks, tip_idx, pip_idx) or
                 (tip.y > pip.y) or
                 (self._euclidean_dist(tip, wrist) <= self._euclidean_dist(pip, wrist) * 1.15)
             )
             if not is_curled:
                 return False
         return True
+
+    def _is_left_hand_fist(self, left_landmarks) -> bool:
+        """Returns True if all 4 fingers of the left hand are curled into a fist for Push-to-Talk."""
+        return self._is_hand_fist(left_landmarks)
 
     def _is_left_hand_extended(self, left_landmarks) -> bool:
         """Returns True if left hand fingers are extended for Modifier (Shift) mode."""
@@ -343,23 +353,53 @@ class GestureRecognizer:
             self.dual_open_start_time = None
 
         # =========================================================================
-        # PRIORITY 3: LEFT-HAND FIST (PUSH-TO-TALK VOICE DICTATION)
+        # PRIORITY 3: DUAL FISTS (ASK FRIDAY AI ASSISTANT) & SINGLE LEFT FIST (PTT DICTATION)
         # =========================================================================
         is_left_fist = False
         is_left_extended = False
+        is_right_fist = False
 
         if left_landmarks is not None and len(left_landmarks) >= 21:
             is_left_fist = self._is_left_hand_fist(left_landmarks)
             if not is_left_fist:
                 is_left_extended = self._is_left_hand_extended(left_landmarks)
 
-        # Fist Hold-Time Debounce for Push-to-Talk Dictation Mode (500ms continuous hold required)
+        if landmarks is not None and len(landmarks) >= 21:
+            is_right_fist = self._is_hand_fist(landmarks)
+
+        # 3A. Dual Fists Detection (Both hands present & both are fists, >= 400ms hold)
+        if is_left_fist and is_right_fist:
+            # Suppress single-fist timer while evaluating dual fists
+            self.fist_start_time = None
+            self.is_fist_active = False
+
+            if self.dual_fist_start_time is None:
+                self.dual_fist_start_time = now
+
+            elapsed_dual = now - self.dual_fist_start_time
+            if elapsed_dual >= self.DUAL_FIST_HOLD_THRESHOLD:
+                self.is_dual_fist_active = True
+                self.reset_pinch_states()
+                self.prev_scroll_y = None
+                self.scroll_accumulator = 0.0
+                return GestureState.AI_LISTENING, 0.0, 0, "● ASKING FRIDAY (Listening...)", screen_pos, None, None
+            else:
+                # While charging dual fists (< 400ms), suppress lower priority gestures
+                self.reset_pinch_states()
+                self.prev_scroll_y = None
+                self.scroll_accumulator = 0.0
+                return GestureState.POINTING, 0.0, 0, "Charging Ask FRIDAY...", screen_pos, None, None
+        else:
+            self.dual_fist_start_time = None
+            self.is_dual_fist_active = False
+
+        # 3B. Single Left-Hand Fist (Push-to-Talk Voice Dictation, >= 500ms hold)
         if is_left_fist:
             if self.fist_start_time is None:
                 self.fist_start_time = now
 
-            elapsed = now - self.fist_start_time
-            if elapsed >= self.FIST_HOLD_THRESHOLD:
+            elapsed_single = now - self.fist_start_time
+            if elapsed_single >= self.FIST_HOLD_THRESHOLD:
                 self.is_fist_active = True
                 self.reset_pinch_states()
                 self.prev_scroll_y = None
@@ -642,6 +682,8 @@ class GestureRecognizer:
         self.reset_right_hand_states()
         self.fist_start_time = None
         self.is_fist_active = False
+        self.dual_fist_start_time = None
+        self.is_dual_fist_active = False
         self.dual_open_start_time = None
         self.is_radial_active = False
 
