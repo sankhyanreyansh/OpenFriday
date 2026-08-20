@@ -27,6 +27,8 @@ class GestureState(Enum):
     TRANSCRIBING = "TRANSCRIBING"
     RADIAL_MENU = "RADIAL MENU"
     AI_LISTENING = "AI LISTENING"
+    SNIP_DRAG = "SNIP DRAG"
+    SNIP_RELEASE = "SNIP RELEASE"
 
 
 class GestureData:
@@ -49,6 +51,7 @@ class GestureData:
         is_modifier_active: bool = False,
         nav_action: Optional[str] = None,
         radial_sector: Optional[str] = None,
+        snip_box: Optional[Tuple[float, float, float, float]] = None,
     ):
         self.raw_x = raw_x
         self.raw_y = raw_y
@@ -65,6 +68,7 @@ class GestureData:
         self.is_modifier_active = is_modifier_active
         self.nav_action = nav_action
         self.radial_sector = radial_sector
+        self.snip_box = snip_box
 
 
 class GestureRecognizer:
@@ -116,6 +120,8 @@ class GestureRecognizer:
         self.pinch_freeze_x: float = 0.0
         self.pinch_freeze_y: float = 0.0
         self.pinch_start_modifier: bool = False
+        self.is_snipping: bool = False
+        self.snip_box: Optional[Tuple[float, float, float, float]] = None
 
         self.last_tap_time: float = 0.0
         self.last_tap_x: float = 0.0
@@ -323,12 +329,12 @@ class GestureRecognizer:
                         # 1. Inside valid sector: Execute corresponding shortcut
                         if R_INNER <= dist <= R_OUTER and active_sector is not None:
                             nav_action = active_sector
-                            return GestureState.RADIAL_MENU, 0.0, 0, f"Executed {nav_action}", screen_pos, nav_action, active_sector
+                            return GestureState.RADIAL_MENU, 0.0, 0, f"Executed {nav_action}", screen_pos, nav_action, active_sector, None
                         else:
                             # 2. Outside wheel or in deadzone: Dismiss without action
-                            return GestureState.POINTING, 0.0, 0, "Radial Wheel Dismissed", screen_pos, None, None
+                            return GestureState.POINTING, 0.0, 0, "Radial Wheel Dismissed", screen_pos, None, None, None
 
-            return GestureState.RADIAL_MENU, (1.0 if self.is_pinching else 0.0), 0, f"Radial: {active_sector or 'Neutral'}", screen_pos, None, active_sector
+            return GestureState.RADIAL_MENU, (1.0 if self.is_pinching else 0.0), 0, f"Radial: {active_sector or 'Neutral'}", screen_pos, None, active_sector, None
 
         # 1B. Dual Open Palms Detection (Charge for 250ms & suppress all other gestures)
         if left_landmarks is not None and landmarks is not None:
@@ -340,13 +346,13 @@ class GestureRecognizer:
                 if (now - self.dual_open_start_time) >= self.DUAL_OPEN_HOLD_THRESHOLD:
                     self.is_radial_active = True
                     self.reset_pinch_states()
-                    return GestureState.RADIAL_MENU, 0.0, 0, "Radial Menu Opened", screen_pos, None, None
+                    return GestureState.RADIAL_MENU, 0.0, 0, "Radial Menu Opened", screen_pos, None, None, None
                 else:
                     # While charging dual open palms, SUPPRESS all lower priority gestures (scroll, clicks, drags)
                     self.reset_pinch_states()
                     self.prev_scroll_y = None
                     self.scroll_accumulator = 0.0
-                    return GestureState.POINTING, 0.0, 0, "Charging Radial Menu...", screen_pos, None, None
+                    return GestureState.POINTING, 0.0, 0, "Charging Radial Menu...", screen_pos, None, None, None
             else:
                 self.dual_open_start_time = None
         else:
@@ -382,13 +388,13 @@ class GestureRecognizer:
                 self.reset_pinch_states()
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.AI_LISTENING, 0.0, 0, "● ASKING FRIDAY (Listening...)", screen_pos, None, None
+                return GestureState.AI_LISTENING, 0.0, 0, "● ASKING FRIDAY (Listening...)", screen_pos, None, None, None
             else:
                 # While charging dual fists (< 400ms), suppress lower priority gestures
                 self.reset_pinch_states()
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.POINTING, 0.0, 0, "Charging Ask FRIDAY...", screen_pos, None, None
+                return GestureState.POINTING, 0.0, 0, "Charging Ask FRIDAY...", screen_pos, None, None, None
         else:
             self.dual_fist_start_time = None
             self.is_dual_fist_active = False
@@ -404,7 +410,7 @@ class GestureRecognizer:
                 self.reset_pinch_states()
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None, None
             else:
                 is_left_extended = False
         else:
@@ -417,13 +423,13 @@ class GestureRecognizer:
         if landmarks is None or len(landmarks) < 21:
             self.reset_right_hand_states()
             if is_left_fist and self.is_fist_active:
-                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None, None, None
             elif is_left_fist:
-                return GestureState.NONE, 0.0, 0, "Left Fist (Hold for Voice)...", screen_pos, None, None
+                return GestureState.NONE, 0.0, 0, "Left Fist (Hold for Voice)...", screen_pos, None, None, None
             elif is_left_extended:
-                return GestureState.NONE, 0.0, 0, "[SHIFT] Modifier Ready (Show Right Hand)", screen_pos, None, None
+                return GestureState.NONE, 0.0, 0, "[SHIFT] Modifier Ready (Show Right Hand)", screen_pos, None, None, None
             else:
-                return GestureState.NONE, 0.0, 0, "Searching for Right Hand...", screen_pos, None, None
+                return GestureState.NONE, 0.0, 0, "Searching for Right Hand...", screen_pos, None, None, None
 
         # Modifier is active only when Left Hand is extended and NOT a fist
         is_modifier_active = is_left_extended and not is_left_fist
@@ -517,7 +523,7 @@ class GestureRecognizer:
                     self.three_finger_history.clear()
 
 
-            return GestureState.SWIPE_NAV, 0.0, 0, status_msg, screen_pos, nav_action, None
+            return GestureState.SWIPE_NAV, 0.0, 0, status_msg, screen_pos, nav_action, None, None
 
         self.three_finger_history.clear()
 
@@ -548,11 +554,11 @@ class GestureRecognizer:
                 else:
                     status_msg = "[SHIFT] Scroll Active (Move Up/Down)"
 
-                return GestureState.SCROLLING, 0.0, scroll_dy, status_msg, screen_pos, None, None
+                return GestureState.SCROLLING, 0.0, scroll_dy, status_msg, screen_pos, None, None, None
             else:
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None, None
+                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None, None, None
 
         self.prev_scroll_y = None
         self.scroll_accumulator = 0.0
@@ -595,10 +601,12 @@ class GestureRecognizer:
                 self.pinch_freeze_y = sy
                 self.pinch_start_modifier = is_modifier_active
                 self.is_dragging = False
+                self.is_snipping = False
+                self.snip_box = None
                 current_action = GestureState.PINCHING
                 status_msg = "Pinch Active"
                 if is_modifier_active:
-                    status_msg = "[SHIFT] Right Pinch Active"
+                    status_msg = "[SHIFT] Snip / Right Pinch Active"
                 effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
         else:
             # Currently pinching
@@ -607,7 +615,15 @@ class GestureRecognizer:
                 pinch_duration = now - self.pinch_start_time
                 self.is_pinching = False
 
-                if self.is_dragging:
+                if self.is_snipping:
+                    # Snippet drag released -> trigger capture
+                    self.snip_box = (self.pinch_freeze_x, self.pinch_freeze_y, sx, sy)
+                    self.is_snipping = False
+                    self.is_dragging = False
+                    current_action = GestureState.SNIP_RELEASE
+                    status_msg = "Snippet Captured"
+                    effective_pos = (sx, sy)
+                elif self.is_dragging:
                     self.is_dragging = False
                     current_action = GestureState.POINTING
                     status_msg = "Drag Released"
@@ -636,7 +652,7 @@ class GestureRecognizer:
                                 self.last_tap_x = self.pinch_freeze_x
                                 self.last_tap_y = self.pinch_freeze_y
                     else:
-                        # Long hold released without meeting 35px drag distance -> Left Click at target
+                        # Long hold released without meeting drag distance -> Left Click at target
                         current_action = GestureState.CLICK
                         status_msg = "Left Click"
 
@@ -646,28 +662,39 @@ class GestureRecognizer:
                 pinch_duration = now - self.pinch_start_time
                 dist_moved = math.hypot(sx - self.pinch_freeze_x, sy - self.pinch_freeze_y)
 
-                # Mandatory Spatial Movement Gate (Only in Normal Mode without modifier)
-                if not self.pinch_start_modifier and not is_modifier_active:
+                if self.pinch_start_modifier or is_modifier_active:
+                    # Modifier active -> Snipping Mode
+                    if (dist_moved > 15.0 or pinch_duration > 0.20):
+                        self.is_snipping = True
+                        self.snip_box = (self.pinch_freeze_x, self.pinch_freeze_y, sx, sy)
+                        current_action = GestureState.SNIP_DRAG
+                        status_msg = "[SHIFT] Snip Area Selection"
+                        effective_pos = (sx, sy)
+                    else:
+                        current_action = GestureState.PINCHING
+                        status_msg = "[SHIFT] Right Pinch Locked"
+                        effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
+                else:
+                    # Normal mode -> Desktop Dragging
                     if (pinch_duration > self.drag_time_threshold and dist_moved > self.drag_dist_threshold) and not self.is_dragging:
                         self.is_dragging = True
 
-                if self.is_dragging:
-                    current_action = GestureState.DRAGGING
-                    status_msg = "Dragging"
-                    effective_pos = (sx, sy)
-                else:
-                    # Hold locked position during click/hold
-                    current_action = GestureState.PINCHING
-                    status_msg = "Pinch Locked"
-                    if is_modifier_active or self.pinch_start_modifier:
-                        status_msg = "[SHIFT] Right Pinch Locked"
-                    effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
+                    if self.is_dragging:
+                        current_action = GestureState.DRAGGING
+                        status_msg = "Dragging"
+                        effective_pos = (sx, sy)
+                    else:
+                        current_action = GestureState.PINCHING
+                        status_msg = "Pinch Locked"
+                        effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
 
-        return current_action, pinch_progress, 0, status_msg, effective_pos, None, None
+        return current_action, pinch_progress, 0, status_msg, effective_pos, None, None, self.snip_box
 
     def reset_pinch_states(self):
         self.is_pinching = False
         self.is_dragging = False
+        self.is_snipping = False
+        self.snip_box = None
 
     def reset_right_hand_states(self):
         self.reset_pinch_states()

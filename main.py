@@ -17,7 +17,7 @@ from PyQt6.QtGui import QIcon, QAction, QGuiApplication
 from mouse_controller import MouseController
 from vision_engine import VisionEngine
 from overlay_window import TransparentOverlay
-from hud_sidebar import GlassmorphicHUDPanel
+from hud_sidebar import GlassmorphicHUDPanel, HUDContextCard
 import permissions
 
 
@@ -49,6 +49,7 @@ def main():
         # 1. Initialize Controller & Windows
         mouse_ctrl = MouseController()
         hud_pill = GlassmorphicHUDPanel() if not args.no_sidebar else None
+        hud_context_card = HUDContextCard(anchor_pill=hud_pill) if not args.no_sidebar else None
         reticle_overlay = TransparentOverlay() if not args.no_overlay else None
 
         # 2. Background Vision Engine
@@ -60,6 +61,11 @@ def main():
             vision_thread.transcription_completed.connect(lambda txt: hud_pill.flash_transcribing())
             vision_thread.ai_status_changed.connect(hud_pill.update_ai_status)
             hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
+
+        if hud_context_card:
+            vision_thread.context_image_captured.connect(hud_context_card.set_thumbnail)
+            vision_thread.ai_response_generated.connect(hud_context_card.set_ai_reply)
+            hud_context_card.context_cleared.connect(vision_thread.ai_assistant.clear_context_image)
 
         if reticle_overlay:
             vision_thread.gesture_updated.connect(reticle_overlay.update_gesture_data)
@@ -105,6 +111,8 @@ def main():
                 reticle_overlay.close()
             if hud_pill:
                 hud_pill.close()
+            if hud_context_card:
+                hud_context_card.close()
             app.quit()
 
         signal.signal(signal.SIGINT, lambda sig, frame: cleanup())

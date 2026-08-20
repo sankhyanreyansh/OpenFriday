@@ -13,10 +13,11 @@ from system_tools import open_website, open_application
 
 
 class AIAssistant:
-    """Lightweight local AI assistant client integrating Ollama function calling and macOS native TTS."""
+    """Lightweight local AI assistant client integrating Ollama function calling, vision, and macOS native TTS."""
 
     def __init__(self, model: str = "qwen2.5:0.5b", host: str = "http://127.0.0.1:11434"):
         self.model = model
+        self.vision_model = "qwen2.5vl:3b"
         self.host = host
         self.client = ollama.Client(host=self.host)
         self.system_instruction = (
@@ -29,20 +30,47 @@ class AIAssistant:
             "open_website": open_website,
             "open_application": open_application,
         }
+        self.context_image_bytes: Optional[bytes] = None
+        self.on_context_changed: Optional[Callable[[Optional[bytes]], None]] = None
+        self.on_reply_generated: Optional[Callable[[str], None]] = None
+
+    def set_context_image(self, image_bytes: bytes):
+        """Stores the most recent captured screen context image bytes."""
+        self.context_image_bytes = image_bytes
+        if self.on_context_changed:
+            try:
+                self.on_context_changed(image_bytes)
+            except Exception as e:
+                print(f"[WARN] Error in context changed callback: {e}")
+
+    def clear_context_image(self):
+        """Clears currently stored context image."""
+        self.context_image_bytes = None
+        if self.on_context_changed:
+            try:
+                self.on_context_changed(None)
+            except Exception as e:
+                print(f"[WARN] Error in context changed callback: {e}")
 
     def query(
         self,
         prompt: str,
         image_bytes: Optional[bytes] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
+        on_reply_generated: Optional[Callable[[str], None]] = None,
     ):
         """Sends prompt (and optional image) to local Ollama in a background thread and speaks the response."""
         if not prompt or not prompt.strip():
             return
 
+        effective_image = image_bytes if image_bytes is not None else self.context_image_bytes
+        # One-time context consumption: clear staged context image immediately upon consumption
+        if self.context_image_bytes is not None:
+            self.clear_context_image()
+
         threading.Thread(
             target=self._process_query,
-            args=(prompt.strip(), image_bytes, on_status_change),
+            args=(prompt.strip(), effective_image, on_status_change, on_reply_generated),
             daemon=True,
         ).start()
 
@@ -51,6 +79,7 @@ class AIAssistant:
         prompt: str,
         image_bytes: Optional[bytes],
         on_status_change: Optional[Callable[[str], None]],
+        on_reply_generated: Optional[Callable[[str], None]] = None,
     ):
         try:
             if on_status_change:
@@ -74,10 +103,12 @@ class AIAssistant:
                 user_message,
             ]
 
+            target_model = self.vision_model if image_bytes else self.model
+
             # Execute chat with registered system tools
             try:
                 response = self.client.chat(
-                    model=self.model,
+                    model=target_model,
                     messages=messages,
                     tools=self.tools if not image_bytes else None,
                     options={
@@ -88,7 +119,7 @@ class AIAssistant:
             except Exception as err:
                 if "does not support tools" in str(err).lower():
                     response = self.client.chat(
-                        model=self.model,
+                        model=target_model,
                         messages=messages,
                         options={
                             "temperature": 0.6,
@@ -130,7 +161,7 @@ class AIAssistant:
 
                 # Follow-up query to generate final natural spoken response
                 final_response = self.client.chat(
-                    model=self.model,
+                    model=target_model,
                     messages=messages,
                     options={"temperature": 0.3, "num_predict": 40},
                 )
@@ -151,6 +182,17 @@ class AIAssistant:
             if not reply:
                 reply = "I didn't receive a response."
 
+            if on_reply_generated:
+                try:
+                    on_reply_generated(reply)
+                except Exception as cb_err:
+                    print(f"[WARN] Error in on_reply_generated: {cb_err}")
+            elif self.on_reply_generated:
+                try:
+                    self.on_reply_generated(reply)
+                except Exception as cb_err:
+                    print(f"[WARN] Error in self.on_reply_generated: {cb_err}")
+
             if on_status_change:
                 on_status_change("SPEAKING")
 
@@ -161,9 +203,21 @@ class AIAssistant:
 
         except Exception as e:
             print(f"[ERROR] Ollama request failed: {e}")
+            error_msg = "Sorry, I had trouble connecting to the local model."
+            if on_reply_generated:
+                try:
+                    on_reply_generated(error_msg)
+                except Exception:
+                    pass
+            elif self.on_reply_generated:
+                try:
+                    self.on_reply_generated(error_msg)
+                except Exception:
+                    pass
+
             if on_status_change:
                 on_status_change("SPEAKING")
-            self._speak("Sorry, I had trouble connecting to the local model.")
+            self._speak(error_msg)
             if on_status_change:
                 on_status_change("IDLE")
 
@@ -180,3 +234,4 @@ class AIAssistant:
 
 # Backward-compatible alias
 GeminiAssistant = AIAssistant
+

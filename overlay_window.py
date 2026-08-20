@@ -154,7 +154,11 @@ class TransparentOverlay(QWidget):
         for ripple in self.ripples:
             ripple.draw(painter)
 
-        # 2. Draw GTA-Style Radial Shortcut Wheel if in RADIAL_MENU state
+        # 2. Draw Snipping Bounding Box if in SNIP_DRAG mode
+        if self.current_data and self.current_data.state == GestureState.SNIP_DRAG and self.current_data.snip_box:
+            self._draw_snip_selection(painter, self.current_data.snip_box)
+
+        # 3. Draw GTA-Style Radial Shortcut Wheel if in RADIAL_MENU state
         if self.current_data and self.current_data.state == GestureState.RADIAL_MENU:
             cx = self.width() / 2.0
             cy = self.height() / 2.0
@@ -164,7 +168,7 @@ class TransparentOverlay(QWidget):
             pinch = self.current_data.pinch_progress
             self._draw_radial_menu(painter, cx, cy, active_sec, cur_x, cur_y, pinch)
 
-        # 3. Draw Minimalist Monochrome Reticle if tracking is active
+        # 4. Draw Minimalist Monochrome Reticle if tracking is active
         elif self.current_data and self.current_data.is_tracking and self.show_reticle:
             cx = self.current_data.screen_x
             cy = self.current_data.screen_y
@@ -174,6 +178,54 @@ class TransparentOverlay(QWidget):
             self._draw_reticle(painter, cx, cy, state, pinch)
 
         painter.end()
+
+    def _draw_snip_selection(self, painter: QPainter, snip_box: Tuple[float, float, float, float]):
+        """Draws a translucent selection rectangle with dashed border and corner accents."""
+        x1, y1, x2, y2 = snip_box
+        rx = min(x1, x2)
+        ry = min(y1, y2)
+        rw = abs(x2 - x1)
+        rh = abs(y2 - y1)
+
+        if rw < 2 or rh < 2:
+            return
+
+        rect = QRectF(rx, ry, rw, rh)
+
+        # Translucent selection fill
+        painter.setBrush(QBrush(QColor(255, 255, 255, 20)))
+
+        # Dashed glowing border
+        border_pen = QPen(QColor(244, 244, 245, 180), 1.5, Qt.PenStyle.DashLine)
+        border_pen.setDashPattern([6, 4])
+        painter.setPen(border_pen)
+        painter.drawRect(rect)
+
+        # Corner bracket accents
+        corner_pen = QPen(QColor(255, 255, 255, 240), 2.0)
+        painter.setPen(corner_pen)
+        c_len = min(12.0, rw / 2.0, rh / 2.0)
+
+        # Top-Left
+        painter.drawLine(QPointF(rx, ry), QPointF(rx + c_len, ry))
+        painter.drawLine(QPointF(rx, ry), QPointF(rx, ry + c_len))
+        # Top-Right
+        painter.drawLine(QPointF(rx + rw, ry), QPointF(rx + rw - c_len, ry))
+        painter.drawLine(QPointF(rx + rw, ry), QPointF(rx + rw, ry + c_len))
+        # Bottom-Left
+        painter.drawLine(QPointF(rx, ry + rh), QPointF(rx + c_len, ry + rh))
+        painter.drawLine(QPointF(rx, ry + rh), QPointF(rx, ry + rh - c_len))
+        # Bottom-Right
+        painter.drawLine(QPointF(rx + rw, ry + rh), QPointF(rx + rw - c_len, ry + rh))
+        painter.drawLine(QPointF(rx + rw, ry + rh), QPointF(rx + rw, ry + rh - c_len))
+
+        # Dimensions / Status Label tag
+        tag_text = f"● SNIP CONTEXT ({int(rw)} × {int(rh)})"
+        painter.setFont(QFont("Helvetica Neue", 10, QFont.Weight.DemiBold))
+        tag_rect = QRectF(rx, max(10.0, ry - 22.0), max(200.0, rw), 18.0)
+        painter.setPen(QColor(244, 244, 245, 220))
+        painter.drawText(tag_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, tag_text)
+
 
     def _draw_radial_menu(
         self,

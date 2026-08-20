@@ -19,9 +19,8 @@ import numpy as np
 import cv2
 import mediapipe as mp
 
-from PyQt6.QtCore import QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QImage
-
+from PyQt6.QtCore import QThread, pyqtSignal, QObject, QBuffer, QIODevice
+from PyQt6.QtGui import QImage, QGuiApplication
 from landmark_smoother import LandmarkSmoother
 from one_euro_filter import VelocityAdaptiveEMAFilter
 from gesture_recognizer import GestureRecognizer, GestureState, GestureData
@@ -97,16 +96,19 @@ class CameraGrabber(threading.Thread):
             self.cap.release()
 
 
+
 class VisionEngine(QThread):
     """Asynchronous camera capture and dual-hand gesture processing engine with centroid tracking."""
 
-    # Qt Signals
-    frame_ready = pyqtSignal(QImage)
-    gesture_updated = pyqtSignal(object)  # Emits GestureData
-    status_changed = pyqtSignal(str)
+    # Signals for UI communication
+    frame_ready = pyqtSignal(np.ndarray)
+    gesture_updated = pyqtSignal(GestureData)
     fps_updated = pyqtSignal(float)
+    status_changed = pyqtSignal(str)
     transcription_completed = pyqtSignal(str)
     ai_status_changed = pyqtSignal(str)
+    context_image_captured = pyqtSignal(bytes)
+    ai_response_generated = pyqtSignal(str)
 
     def __init__(
         self,
@@ -345,11 +347,19 @@ class VisionEngine(QThread):
         """Callback when AI Assistant changes status (THINKING, SPEAKING, IDLE)."""
         self.ai_status_changed.emit(status)
 
+    def _on_ai_reply_generated(self, reply: str):
+        """Callback when AI Assistant generates final text response."""
+        self.ai_response_generated.emit(reply)
+
     def _on_ai_transcription_complete(self, text: str):
         """Callback when local Whisper transcription completes for AI Assistant."""
         self.transcription_completed.emit(text)
         if text and text.strip():
-            self.ai_assistant.query(text, on_status_change=self._on_ai_status_change)
+            self.ai_assistant.query(
+                text,
+                on_status_change=self._on_ai_status_change,
+                on_reply_generated=self._on_ai_reply_generated,
+            )
 
     def run(self):
         """Main vision processing loop with multi-hand classification and centroid persistence."""
@@ -424,7 +434,7 @@ class VisionEngine(QThread):
                         unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
                         filtered_sx, filtered_sy = self.filter.filter(unfiltered_sx, unfiltered_sy, now)
 
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector = self.gesture_recognizer.process(
+                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
                             smoothed_landmarks,
                             (filtered_sx, filtered_sy),
                             left_landmarks=left_hand_landmarks,
@@ -452,6 +462,7 @@ class VisionEngine(QThread):
                             is_modifier_active=(left_hand_landmarks is not None),
                             nav_action=nav_action,
                             radial_sector=radial_sector,
+                            snip_box=snip_box,
                         )
                     else:
                         # Right hand not in frame:
@@ -461,7 +472,7 @@ class VisionEngine(QThread):
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
 
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector = self.gesture_recognizer.process(
+                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
                             None,
                             (0.0, 0.0),
                             left_landmarks=left_hand_landmarks,
@@ -484,7 +495,27 @@ class VisionEngine(QThread):
                             is_modifier_active=(left_hand_landmarks is not None),
                             nav_action=None,
                             radial_sector=radial_sector,
+                            snip_box=snip_box,
                         )
+
+                    # Handle Screen Snippet Capture on SNIP_RELEASE
+                    if gesture_state == GestureState.SNIP_RELEASE and snip_box is not None:
+                        x1, y1, x2, y2 = snip_box
+                        rx = min(x1, x2)
+                        ry = min(y1, y2)
+                        rw = abs(x2 - x1)
+                        rh = abs(y2 - y1)
+                        if rw > 20 and rh > 20:
+                            screen = QGuiApplication.primaryScreen()
+                            if screen:
+                                pix = screen.grabWindow(0, int(rx), int(ry), int(rw), int(rh))
+                                if not pix.isNull():
+                                    buf = QBuffer()
+                                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                                    pix.save(buf, "PNG")
+                                    img_bytes = bytes(buf.data())
+                                    self.ai_assistant.set_context_image(img_bytes)
+                                    self.context_image_captured.emit(img_bytes)
 
                     # Handle Voice Dictation & AI Assistant State Transitions
                     if gesture_state == GestureState.AI_LISTENING:
@@ -534,6 +565,13 @@ class VisionEngine(QThread):
     ):
         """Executes native mouse actions according to gesture state machine."""
         if state == GestureState.NONE:
+            if self.was_dragging:
+                self.mouse_controller.mouse_up()
+                self.was_dragging = False
+            return
+
+        # Snipping Mode (Freeze mouse drag and clicks)
+        if state in (GestureState.SNIP_DRAG, GestureState.SNIP_RELEASE):
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
