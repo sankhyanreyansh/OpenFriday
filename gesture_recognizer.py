@@ -23,6 +23,8 @@ class GestureState(Enum):
     RIGHT_CLICK = "RIGHT CLICK"
     SCROLLING = "SCROLLING"
     SWIPE_NAV = "SWIPE NAV"
+    LISTENING = "LISTENING"
+    TRANSCRIBING = "TRANSCRIBING"
 
 
 class GestureData:
@@ -130,6 +132,11 @@ class GestureRecognizer:
         self.last_swipe_time: float = 0.0
         self.swipe_cooldown: float = 0.60
 
+        # Push-to-talk voice dictation fist hold debounce
+        self.fist_start_time: Optional[float] = None
+        self.is_fist_active: bool = False
+        self.FIST_HOLD_THRESHOLD: float = 0.5  # 500ms continuous hold required
+
     def _euclidean_dist(self, p1, p2) -> float:
         dx = p1.x - p2.x
         dy = p1.y - p2.y
@@ -155,6 +162,42 @@ class GestureRecognizer:
         pip_dist = self._euclidean_dist(landmarks[pip_idx], wrist)
         return tip_dist <= pip_dist * 1.15
 
+    def _is_left_hand_fist(self, left_landmarks) -> bool:
+        """Returns True if all 4 fingers of the left hand are curled into a fist for Push-to-Talk."""
+        if left_landmarks is None or len(left_landmarks) < 21:
+            return False
+        wrist = left_landmarks[self.WRIST]
+        # Check Index, Middle, Ring, Pinky
+        for tip_idx, pip_idx in [
+            (self.INDEX_TIP, self.INDEX_PIP),
+            (self.MIDDLE_TIP, self.MIDDLE_PIP),
+            (self.RING_TIP, self.RING_PIP),
+            (self.PINKY_TIP, self.PINKY_PIP),
+        ]:
+            tip = left_landmarks[tip_idx]
+            pip = left_landmarks[pip_idx]
+            is_curled = (
+                self._is_finger_curled(left_landmarks, tip_idx, pip_idx) or
+                (tip.y > pip.y) or
+                (self._euclidean_dist(tip, wrist) <= self._euclidean_dist(pip, wrist) * 1.15)
+            )
+            if not is_curled:
+                return False
+        return True
+
+    def _is_left_hand_extended(self, left_landmarks) -> bool:
+        """Returns True if left hand fingers are extended for Modifier (Shift) mode."""
+        if left_landmarks is None or len(left_landmarks) < 21:
+            return False
+        wrist = left_landmarks[self.WRIST]
+        idx_ext = (left_landmarks[self.INDEX_TIP].y < left_landmarks[self.INDEX_PIP].y) or (
+            self._euclidean_dist(left_landmarks[self.INDEX_TIP], wrist) > self._euclidean_dist(left_landmarks[self.INDEX_PIP], wrist) * 1.05
+        )
+        mid_ext = (left_landmarks[self.MIDDLE_TIP].y < left_landmarks[self.MIDDLE_PIP].y) or (
+            self._euclidean_dist(left_landmarks[self.MIDDLE_TIP], wrist) > self._euclidean_dist(left_landmarks[self.MIDDLE_PIP], wrist) * 1.05
+        )
+        return idx_ext and mid_ext
+
     def get_stable_pointer_coords(self, landmarks) -> Tuple[float, float]:
         """
         Drives cursor navigation directly from Index MCP (Landmark 5, base knuckle).
@@ -165,22 +208,70 @@ class GestureRecognizer:
 
     def process(
         self,
-        landmarks,
+        landmarks: Optional[List[Any]],
         screen_pos: Tuple[float, float],
         is_left_hand_present: bool = False,
         now: Optional[float] = None,
+        left_landmarks: Optional[List[Any]] = None,
     ) -> Tuple[GestureState, float, int, str, Tuple[float, float], Optional[str]]:
         """
-        Processes dominant hand landmarks, screen position, and modifier presence with strict precedence gating.
+        Processes dominant hand landmarks, screen position, and modifier presence with strict role isolation.
         Returns:
             (gesture_state, pinch_progress, scroll_dy, status_message, effective_screen_pos, nav_action)
         """
         if now is None:
             now = time.time()
 
+        # =========================================================================
+        # 1. EVALUATE LEFT HAND (Strictly Binary: Open Modifier vs. Closed Fist PTT)
+        # =========================================================================
+        is_left_fist = False
+        is_left_extended = False
+
+        if left_landmarks is not None and len(left_landmarks) >= 21:
+            is_left_fist = self._is_left_hand_fist(left_landmarks)
+            if not is_left_fist:
+                is_left_extended = self._is_left_hand_extended(left_landmarks)
+
+        # Fist Hold-Time Debounce for Push-to-Talk Dictation Mode (500ms continuous hold required)
+        if is_left_fist:
+            if self.fist_start_time is None:
+                self.fist_start_time = now
+
+            elapsed = now - self.fist_start_time
+            if elapsed >= self.FIST_HOLD_THRESHOLD:
+                self.is_fist_active = True
+                self.reset_pinch_states()
+                self.prev_scroll_y = None
+                self.scroll_accumulator = 0.0
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None
+            else:
+                # Fist held but hasn't reached 500ms threshold yet; block modifiers
+                is_left_extended = False
+        else:
+            # Left hand is no longer a fist
+            self.fist_start_time = None
+            self.is_fist_active = False
+
+        # =========================================================================
+        # 2. IF NO RIGHT HAND IN FRAME: STOP HERE (Zero cursor, clicks, or pinches)
+        # =========================================================================
         if landmarks is None or len(landmarks) < 21:
-            self.reset_transient_states()
-            return GestureState.NONE, 0.0, 0, "No Hand Detected", screen_pos, None
+            self.reset_right_hand_states()
+            if is_left_fist and self.is_fist_active:
+                return GestureState.LISTENING, 0.0, 0, "● Push-to-Talk (Listening...)", screen_pos, None
+            elif is_left_fist:
+                return GestureState.NONE, 0.0, 0, "Left Fist (Hold for Voice)...", screen_pos, None
+            elif is_left_extended:
+                return GestureState.NONE, 0.0, 0, "[SHIFT] Modifier Ready (Show Right Hand)", screen_pos, None
+            else:
+                return GestureState.NONE, 0.0, 0, "Searching for Right Hand...", screen_pos, None
+
+
+        # Modifier is active only when Left Hand is extended and NOT a fist
+        is_modifier_active = is_left_extended and not is_left_fist
+
+
 
         palm_scale = self._get_palm_scale(landmarks)
         sx, sy = screen_pos
@@ -223,7 +314,7 @@ class GestureRecognizer:
         # =========================================================================
         # STEP 1: STRICT 3-FINGER SPATIAL NAVIGATION (Index + Middle + Ring Extended, Pinky Curled)
         # =========================================================================
-        is_three_finger = is_index_extended and is_middle_extended and is_ring_extended and is_pinky_curled
+        is_three_finger = (not is_left_fist) and is_index_extended and is_middle_extended and is_ring_extended and is_pinky_curled
 
         if is_three_finger:
             self.reset_pinch_states()
@@ -284,7 +375,7 @@ class GestureRecognizer:
             # Force mode to SCROLL ONLY, completely bypassing all pinch/click detection
             self.reset_pinch_states()
 
-            if is_left_hand_present:
+            if is_modifier_active:
                 curr_y = (landmarks[self.INDEX_TIP].y + landmarks[self.MIDDLE_TIP].y) * 0.5
                 scroll_dy = 0
 
@@ -309,7 +400,7 @@ class GestureRecognizer:
             else:
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
-                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Raise Left Hand to Scroll)", screen_pos, None
+                return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None
 
         self.prev_scroll_y = None
         self.scroll_accumulator = 0.0
@@ -333,15 +424,16 @@ class GestureRecognizer:
 
         current_action = GestureState.POINTING
         status_msg = "Pointing / Hover"
-        if is_left_hand_present:
+        if is_modifier_active:
             status_msg = "[SHIFT] Modifier Active"
         effective_pos = (sx, sy)
 
-        # Pinch intent requires middle finger to be curled
-        pinch_intent = middle_curled and (
+        # Pinch intent requires middle finger to be curled and left hand NOT in a fist
+        pinch_intent = (not is_left_fist) and middle_curled and (
             index_thumb_min_dist < self.pinch_start_threshold or
             (is_stationary_knuckle and index_thumb_min_dist < (self.pinch_start_threshold * 1.15))
         )
+
 
         if not self.is_pinching:
             if pinch_intent:
@@ -349,11 +441,11 @@ class GestureRecognizer:
                 self.pinch_start_time = now
                 self.pinch_freeze_x = sx
                 self.pinch_freeze_y = sy
-                self.pinch_start_modifier = is_left_hand_present
+                self.pinch_start_modifier = is_modifier_active
                 self.is_dragging = False
                 current_action = GestureState.PINCHING
                 status_msg = "Pinch Active"
-                if is_left_hand_present:
+                if is_modifier_active:
                     status_msg = "[SHIFT] Right Pinch Active"
                 effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
         else:
@@ -373,7 +465,7 @@ class GestureRecognizer:
                     if pinch_duration < self.tap_max_time:
                         # MODIFIER CHECK:
                         # If Left Hand was present during pinch -> RIGHT CLICK
-                        if self.pinch_start_modifier or is_left_hand_present:
+                        if self.pinch_start_modifier or is_modifier_active:
                             current_action = GestureState.RIGHT_CLICK
                             status_msg = "[SHIFT] Right Click"
                         else:
@@ -403,7 +495,7 @@ class GestureRecognizer:
                 dist_moved = math.hypot(sx - self.pinch_freeze_x, sy - self.pinch_freeze_y)
 
                 # Mandatory Spatial Movement Gate (Only in Normal Mode without modifier)
-                if not self.pinch_start_modifier and not is_left_hand_present:
+                if not self.pinch_start_modifier and not is_modifier_active:
                     if (pinch_duration > self.drag_time_threshold and dist_moved > self.drag_dist_threshold) and not self.is_dragging:
                         self.is_dragging = True
 
@@ -415,17 +507,18 @@ class GestureRecognizer:
                     # Hold locked position during click/hold
                     current_action = GestureState.PINCHING
                     status_msg = "Pinch Locked"
-                    if is_left_hand_present or self.pinch_start_modifier:
+                    if is_modifier_active or self.pinch_start_modifier:
                         status_msg = "[SHIFT] Right Pinch Locked"
                     effective_pos = (self.pinch_freeze_x, self.pinch_freeze_y)
 
         return current_action, pinch_progress, 0, status_msg, effective_pos, None
 
+
     def reset_pinch_states(self):
         self.is_pinching = False
         self.is_dragging = False
 
-    def reset_transient_states(self):
+    def reset_right_hand_states(self):
         self.reset_pinch_states()
         self.prev_scroll_y = None
         self.scroll_accumulator = 0.0
@@ -433,4 +526,10 @@ class GestureRecognizer:
         self.prev_tip_pos = None
         self.prev_time = None
         self.three_finger_history.clear()
+
+    def reset_transient_states(self):
+        self.reset_right_hand_states()
+        self.fist_start_time = None
+        self.is_fist_active = False
+
 

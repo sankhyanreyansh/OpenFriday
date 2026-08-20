@@ -26,6 +26,7 @@ from landmark_smoother import LandmarkSmoother
 from one_euro_filter import VelocityAdaptiveEMAFilter
 from gesture_recognizer import GestureRecognizer, GestureState, GestureData
 from mouse_controller import MouseController
+from dictation_engine import VoiceDictationEngine
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
@@ -103,6 +104,7 @@ class VisionEngine(QThread):
     gesture_updated = pyqtSignal(object)  # Emits GestureData
     status_changed = pyqtSignal(str)
     fps_updated = pyqtSignal(float)
+    transcription_completed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -115,6 +117,10 @@ class VisionEngine(QThread):
         self.mouse_controller = mouse_controller or MouseController()
         self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
         self.gesture_recognizer = GestureRecognizer()
+        
+        # Local Voice Dictation Engine (faster-whisper)
+        self.dictation_engine = VoiceDictationEngine(model_size="base.en")
+        self.is_dictating = False
         
         # Hardcoded Optimal Tracking Constants
         # smoothing = 0.2, responsiveness = 0.003, pinch_sensitivity = 0.4, scroll_speed = 1.0
@@ -147,6 +153,7 @@ class VisionEngine(QThread):
         # Model path
         self.model_path = ensure_model_file()
         self.grabber: Optional[CameraGrabber] = None
+
 
     def update_settings(self, settings: dict):
         """Dynamically updates vision and control parameters from GUI settings."""
@@ -181,6 +188,9 @@ class VisionEngine(QThread):
     def stop(self):
         """Stops the vision thread safely."""
         self.running = False
+        if self.is_dictating:
+            self.is_dictating = False
+            self.dictation_engine.stop_and_transcribe()
         if self.grabber:
             self.grabber.stop()
         self.wait(2000)
@@ -197,11 +207,14 @@ class VisionEngine(QThread):
         return sx, sy
 
     def _init_landmarker(self):
-        """Initializes MediaPipe HandLandmarker with num_hands=2 for dual-hand modifier detection."""
+        """Initializes MediaPipe HandLandmarker with explicit CPU delegate for zero Metal crashes."""
         from mediapipe.tasks import python
         from mediapipe.tasks.python import vision
 
-        base_options = python.BaseOptions(model_asset_path=self.model_path)
+        base_options = python.BaseOptions(
+            model_asset_path=self.model_path,
+            delegate=python.BaseOptions.Delegate.CPU
+        )
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
@@ -218,66 +231,97 @@ class VisionEngine(QThread):
         cy = (hand_landmarks[0].y + hand_landmarks[5].y + hand_landmarks[9].y + hand_landmarks[17].y) * 0.25
         return cx, cy
 
-    def _classify_hands(self, hands_landmarks, handedness) -> Tuple[int, bool]:
+    def _classify_hands(self, hands_landmarks, handedness) -> Tuple[Optional[Any], Optional[Any]]:
         """
-        Classifies detected hands into Dominant (Right Hand) and Modifier (Left Hand)
-        using Spatial Hysteresis & Centroid Tracking to prevent identity swapping during proximity.
+        Classifies detected hands into Right Hand (Dominant) and Left Hand (Modifier/PTT)
+        using Spatial Hysteresis & Centroid Tracking.
         Returns:
-            (dominant_hand_idx, is_left_hand_present)
+            (right_hand_landmarks, left_hand_landmarks)
         """
         hands_count = len(hands_landmarks)
         if hands_count == 0:
-            return 0, False
+            self.prev_dominant_centroid = None
+            self.prev_modifier_centroid = None
+            return None, None
+
+        # MediaPipe handedness in mirrored camera frame:
+        # Category "Left" in mirrored image corresponds to user's Physical Right Hand.
+        # Category "Right" in mirrored image corresponds to user's Physical Left Hand.
+        target_right_label = "Left" if self.mirror_horizontal else "Right"
+        target_left_label = "Right" if self.mirror_horizontal else "Left"
 
         centroids = [self._compute_palm_centroid(hl) for hl in hands_landmarks]
-        target_dominant_label = "Left" if self.mirror_horizontal else "Right"
 
         if hands_count == 1:
-            dom_idx = 0
-            is_left_present = False
-            self.prev_dominant_centroid = centroids[0]
-            self.prev_modifier_centroid = None
-            return dom_idx, is_left_present
+            is_left = False
+            if handedness and len(handedness) >= 1:
+                h_class = getattr(handedness[0], "classification", handedness[0])
+                if h_class and len(h_class) > 0:
+                    label = getattr(h_class[0], "label", getattr(h_class[0], "category_name", ""))
+                    if label == target_left_label:
+                        is_left = True
+                    elif label == target_right_label:
+                        is_left = False
+
+            if is_left:
+                self.prev_modifier_centroid = centroids[0]
+                self.prev_dominant_centroid = None
+                return None, hands_landmarks[0]
+            else:
+                self.prev_dominant_centroid = centroids[0]
+                self.prev_modifier_centroid = None
+                return hands_landmarks[0], None
 
         # Two or more hands in view:
-        # If we already have persistent centroids from previous frames, match by distance
+        # Check persistent centroids if available
         if self.prev_dominant_centroid is not None and self.prev_modifier_centroid is not None:
-            d0_dom = math.hypot(centroids[0][0] - self.prev_dominant_centroid[0], centroids[0][1] - self.prev_dominant_centroid[1])
-            d1_dom = math.hypot(centroids[1][0] - self.prev_dominant_centroid[0], centroids[1][1] - self.prev_dominant_centroid[1])
+            d0_right = math.hypot(centroids[0][0] - self.prev_dominant_centroid[0], centroids[0][1] - self.prev_dominant_centroid[1])
+            d1_right = math.hypot(centroids[1][0] - self.prev_dominant_centroid[0], centroids[1][1] - self.prev_dominant_centroid[1])
 
-            if d0_dom < d1_dom:
-                dom_idx = 0
-                mod_idx = 1
+            if d0_right < d1_right:
+                right_idx = 0
+                left_idx = 1
             else:
-                dom_idx = 1
-                mod_idx = 0
+                right_idx = 1
+                left_idx = 0
         else:
-            # First dual-hand detection: use MediaPipe handedness label or horizontal position
-            dom_idx = 0
+            right_idx = None
+            left_idx = None
             if handedness and len(handedness) >= 2:
-                for idx, h_info in enumerate(handedness):
-                    if len(h_info) > 0 and h_info[0].category_name == target_dominant_label:
-                        dom_idx = idx
-                        break
+                for idx, h_info in enumerate(handedness[:2]):
+                    h_class = getattr(h_info, "classification", h_info)
+                    if h_class and len(h_class) > 0:
+                        label = getattr(h_class[0], "label", getattr(h_class[0], "category_name", ""))
+                        if label == target_right_label and right_idx is None:
+                            right_idx = idx
+                        elif label == target_left_label and left_idx is None:
+                            left_idx = idx
+
+            if right_idx is None or left_idx is None or right_idx == left_idx:
+                # Fallback: In mirrored frame, user's physical right hand is on right side (greater X)
+                if centroids[0][0] > centroids[1][0]:
+                    right_idx = 0
+                    left_idx = 1
                 else:
-                    # Fallback: hand further right in mirrored frame (greater X) is physical Right
-                    dom_idx = 0 if centroids[0][0] > centroids[1][0] else 1
-            else:
-                dom_idx = 0 if centroids[0][0] > centroids[1][0] else 1
-            mod_idx = 1 - dom_idx
+                    right_idx = 1
+                    left_idx = 0
 
         # Update persistent centroids with EMA smoothing
         alpha = 0.65
         self.prev_dominant_centroid = (
-            alpha * centroids[dom_idx][0] + (1 - alpha) * (self.prev_dominant_centroid[0] if self.prev_dominant_centroid else centroids[dom_idx][0]),
-            alpha * centroids[dom_idx][1] + (1 - alpha) * (self.prev_dominant_centroid[1] if self.prev_dominant_centroid else centroids[dom_idx][1]),
+            alpha * centroids[right_idx][0] + (1 - alpha) * (self.prev_dominant_centroid[0] if self.prev_dominant_centroid else centroids[right_idx][0]),
+            alpha * centroids[right_idx][0] + (1 - alpha) * (self.prev_dominant_centroid[1] if self.prev_dominant_centroid else centroids[right_idx][1]),
         )
         self.prev_modifier_centroid = (
-            alpha * centroids[mod_idx][0] + (1 - alpha) * (self.prev_modifier_centroid[0] if self.prev_modifier_centroid else centroids[mod_idx][0]),
-            alpha * centroids[mod_idx][1] + (1 - alpha) * (self.prev_modifier_centroid[1] if self.prev_modifier_centroid else centroids[mod_idx][1]),
+            alpha * centroids[left_idx][0] + (1 - alpha) * (self.prev_modifier_centroid[0] if self.prev_modifier_centroid else centroids[left_idx][0]),
+            alpha * centroids[left_idx][1] + (1 - alpha) * (self.prev_modifier_centroid[1] if self.prev_modifier_centroid else centroids[left_idx][1]),
         )
 
-        return dom_idx, True
+        return hands_landmarks[right_idx], hands_landmarks[left_idx]
+
+    def _on_transcription_complete(self, text: str):
+        """Callback when local Whisper transcription completes."""
+        self.transcription_completed.emit(text)
 
     def run(self):
         """Main vision processing loop with multi-hand classification and centroid persistence."""
@@ -334,24 +378,29 @@ class VisionEngine(QThread):
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
                     result = landmarker.detect(mp_image)
 
+                    right_hand_landmarks = None
+                    left_hand_landmarks = None
+
                     if result.hand_landmarks and len(result.hand_landmarks) > 0:
-                        dominant_hand_idx, is_left_hand_present = self._classify_hands(
+                        right_hand_landmarks, left_hand_landmarks = self._classify_hands(
                             result.hand_landmarks, getattr(result, "handedness", None)
                         )
 
-                        raw_dominant_landmarks = result.hand_landmarks[dominant_hand_idx]
+                    if right_hand_landmarks is not None:
+                        # Apply Landmark Pre-Smoothing on Right Hand only
+                        smoothed_landmarks = self.landmark_smoother.smooth(right_hand_landmarks)
 
-                        # Apply Landmark Pre-Smoothing
-                        smoothed_landmarks = self.landmark_smoother.smooth(raw_dominant_landmarks)
-
-                        # Extract stable pointer coordinates directly from Index MCP (Landmark 5)
+                        # Extract stable pointer coordinates directly from Right Index MCP (Landmark 5)
                         raw_x, raw_y = self.gesture_recognizer.get_stable_pointer_coords(smoothed_landmarks)
 
                         unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
                         filtered_sx, filtered_sy = self.filter.filter(unfiltered_sx, unfiltered_sy, now)
 
                         gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action = self.gesture_recognizer.process(
-                            smoothed_landmarks, (filtered_sx, filtered_sy), is_left_hand_present, now
+                            smoothed_landmarks,
+                            (filtered_sx, filtered_sy),
+                            left_landmarks=left_hand_landmarks,
+                            now=now,
                         )
 
                         screen_x, screen_y = effective_pos
@@ -372,23 +421,58 @@ class VisionEngine(QThread):
                             confidence=0.95,
                             fps=fps_smoothing,
                             status_message=status_msg,
-                            is_modifier_active=is_left_hand_present,
+                            is_modifier_active=(left_hand_landmarks is not None),
                             nav_action=nav_action,
                         )
                     else:
+                        # Right hand not in frame:
                         self.landmark_smoother.reset()
                         self.filter.reset()
-                        self.gesture_recognizer.reset_transient_states()
-                        self.prev_dominant_centroid = None
-                        self.prev_modifier_centroid = None
                         if self.was_dragging:
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
-                        gesture_data.state = GestureState.NONE
-                        gesture_data.status_message = "No Hand in Frame"
+
+                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action = self.gesture_recognizer.process(
+                            None,
+                            (0.0, 0.0),
+                            left_landmarks=left_hand_landmarks,
+                            now=now,
+                        )
+
+                        gesture_data = GestureData(
+                            raw_x=0.0,
+                            raw_y=0.0,
+                            screen_x=0.0,
+                            screen_y=0.0,
+                            state=gesture_state,
+                            pinch_progress=0.0,
+                            scroll_dy=0,
+                            hand_landmarks=None,
+                            is_tracking=False,
+                            confidence=0.0,
+                            fps=fps_smoothing,
+                            status_message=status_msg,
+                            is_modifier_active=(left_hand_landmarks is not None),
+                            nav_action=None,
+                        )
+
+                    # Handle Voice Dictation Push-to-Talk State Transitions
+                    if gesture_state == GestureState.LISTENING:
+                        if not self.is_dictating:
+                            self.is_dictating = True
+                            self.dictation_engine.start_recording()
+                    else:
+                        if self.is_dictating:
+                            self.is_dictating = False
+                            self.dictation_engine.stop_and_transcribe(on_complete_callback=self._on_transcription_complete)
 
                 self.gesture_updated.emit(gesture_data)
                 self.fps_updated.emit(fps_smoothing)
+
+
+        if self.is_dictating:
+            self.is_dictating = False
+            self.dictation_engine.stop_and_transcribe()
 
         self.grabber.stop()
         self.mouse_controller.release_all()
@@ -404,6 +488,13 @@ class VisionEngine(QThread):
     ):
         """Executes native mouse actions according to gesture state machine."""
         if state == GestureState.NONE:
+            if self.was_dragging:
+                self.mouse_controller.mouse_up()
+                self.was_dragging = False
+            return
+
+        # Voice Dictation (Freeze cursor movement and clicks)
+        if state in (GestureState.LISTENING, GestureState.TRANSCRIBING):
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
@@ -446,4 +537,5 @@ class VisionEngine(QThread):
 
         elif state == GestureState.SCROLLING and scroll_dy != 0:
             self.mouse_controller.scroll(scroll_dy, 0, screen_x, screen_y)
+
 

@@ -149,6 +149,8 @@ class GlassmorphicStatusPill(QWidget):
         self.mini_pause_btn.clicked.connect(self.on_master_toggle)
         p_layout.addWidget(self.mini_pause_btn)
 
+        self.is_flashing_transcribe = False
+
         root_layout.addWidget(self.pill_card)
 
     def on_master_toggle(self):
@@ -162,14 +164,34 @@ class GlassmorphicStatusPill(QWidget):
 
         self.master_toggle_requested.emit(self.is_tracking_active)
 
+    def flash_transcribing(self):
+        """Briefly flashes TRANSCRIBING... status when voice dictation finishes."""
+        self.is_flashing_transcribe = True
+        self.pill_status_lbl.setText("● TRANSCRIBING...")
+        self.pill_status_lbl.setStyleSheet("color: #D4D4D8; font-weight: 500; font-size: 12px;")
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(1200, self._stop_flash_transcribing)
+
+    def _stop_flash_transcribing(self):
+        self.is_flashing_transcribe = False
+
     def update_gesture_data(self, data: GestureData):
-        """Updates live status indicator with dual-hand modifier state."""
+        """Updates live status indicator with dual-hand modifier and dictation state."""
         if not self.is_tracking_active:
+            return
+
+        if self.is_flashing_transcribe:
             return
 
         state_text = data.state.value
 
-        if data.state == GestureState.SWIPE_NAV:
+        if data.state == GestureState.LISTENING:
+            color = "#E4E4E7"
+            display_text = "● LISTENING..."
+        elif data.state == GestureState.TRANSCRIBING:
+            color = "#D4D4D8"
+            display_text = "● TRANSCRIBING..."
+        elif data.state == GestureState.SWIPE_NAV:
             color = "#E4E4E7"
             if data.nav_action == "MISSION_CONTROL":
                 display_text = "● MISSION CONTROL"
@@ -184,9 +206,9 @@ class GlassmorphicStatusPill(QWidget):
 
         self.pill_status_lbl.setText(display_text)
 
-        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV):
+        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING):
             color = "#E4E4E7"
-        elif data.state in (GestureState.DRAGGING, GestureState.PINCHING):
+        elif data.state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.TRANSCRIBING):
             color = "#D4D4D8"
         elif data.state == GestureState.SCROLLING:
             color = "#D4D4D8"
@@ -194,6 +216,7 @@ class GlassmorphicStatusPill(QWidget):
             color = "#A1A1AA"
 
         self.pill_status_lbl.setStyleSheet(f"color: {color}; font-weight: 500; font-size: 12px;")
+
 
 
 # Backward-compatible alias

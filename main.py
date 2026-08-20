@@ -74,6 +74,7 @@ def main():
     # 4. Wire Qt Signal Connections
     if hud_pill:
         vision_thread.gesture_updated.connect(hud_pill.update_gesture_data)
+        vision_thread.transcription_completed.connect(lambda txt: hud_pill.flash_transcribing())
         hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
 
     if reticle_overlay:
@@ -116,7 +117,7 @@ def main():
         print(f"  - Glassmorphic Status Pill: Visible={hud_pill.isVisible()}, Geo={hud_pill.geometry().width()}x{hud_pill.geometry().height()} at ({hud_pill.geometry().x()}, {hud_pill.geometry().y()})")
     if reticle_overlay:
         print(f"  - Click-Through Reticle Overlay: Visible={reticle_overlay.isVisible()}, Geo={reticle_overlay.geometry().width()}x{reticle_overlay.geometry().height()}")
-    print("  - Gestures: Right Pinch = Left Click | Pinch & Hold = Drag | Left Hand Up + Right Pinch = Right Click | Left Hand Up + 2 Fingers = Scroll | 3 Fingers Swipe = Spaces / Mission Control")
+    print("  - Gestures: Right Pinch = Left Click | Pinch & Hold = Drag | Left Hand Extended + Pinch = Right Click | Left Hand Extended + 2 Fingers = Scroll | 3 Fingers Swipe = Spaces / Mission Control | Left Fist = Voice Dictation Push-to-Talk")
     print("  - Press Ctrl+C in terminal or Quit in Menu Bar to exit.")
     print("=" * 65)
 
