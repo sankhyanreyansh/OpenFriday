@@ -359,47 +359,17 @@ class GestureRecognizer:
             self.dual_open_start_time = None
 
         # =========================================================================
-        # PRIORITY 3: DUAL FISTS (ASK FRIDAY AI ASSISTANT) & SINGLE LEFT FIST (PTT DICTATION)
+        # PRIORITY 3: LEFT-HAND PUSH-TO-TALK (VOICE DICTATION & "FRIDAY" ROUTING)
         # =========================================================================
         is_left_fist = False
         is_left_extended = False
-        is_right_fist = False
 
         if left_landmarks is not None and len(left_landmarks) >= 21:
             is_left_fist = self._is_left_hand_fist(left_landmarks)
             if not is_left_fist:
                 is_left_extended = self._is_left_hand_extended(left_landmarks)
 
-        if landmarks is not None and len(landmarks) >= 21:
-            is_right_fist = self._is_hand_fist(landmarks)
-
-        # 3A. Dual Fists Detection (Both hands present & both are fists, >= 400ms hold)
-        if is_left_fist and is_right_fist:
-            # Suppress single-fist timer while evaluating dual fists
-            self.fist_start_time = None
-            self.is_fist_active = False
-
-            if self.dual_fist_start_time is None:
-                self.dual_fist_start_time = now
-
-            elapsed_dual = now - self.dual_fist_start_time
-            if elapsed_dual >= self.DUAL_FIST_HOLD_THRESHOLD:
-                self.is_dual_fist_active = True
-                self.reset_pinch_states()
-                self.prev_scroll_y = None
-                self.scroll_accumulator = 0.0
-                return GestureState.AI_LISTENING, 0.0, 0, "● ASKING FRIDAY (Listening...)", screen_pos, None, None, None
-            else:
-                # While charging dual fists (< 400ms), suppress lower priority gestures
-                self.reset_pinch_states()
-                self.prev_scroll_y = None
-                self.scroll_accumulator = 0.0
-                return GestureState.POINTING, 0.0, 0, "Charging Ask FRIDAY...", screen_pos, None, None, None
-        else:
-            self.dual_fist_start_time = None
-            self.is_dual_fist_active = False
-
-        # 3B. Single Left-Hand Fist (Push-to-Talk Voice Dictation, >= 500ms hold)
+        # Single Left-Hand Fist or Extended Push-to-Talk Trigger
         if is_left_fist:
             if self.fist_start_time is None:
                 self.fist_start_time = now

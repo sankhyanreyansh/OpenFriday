@@ -1,38 +1,206 @@
 """
-Local AI Assistant Engine for FRIDAY powered by Ollama and native macOS Text-to-Speech.
-Provides 100% offline, zero-latency local speech and deterministic system tool execution (opening websites, launching apps).
+Dual-Tier AI Assistant Engine for FRIDAY with native macOS Computer Use GUI Automation.
+Primary: OpenAI API (gpt-4o for GUI perception-action agent loop, gpt-4o-mini for conversation & tools).
+Fallback: Local Ollama (qwen2.5vl:3b for offline and network resilience).
+GUI Automation: Native macOS Quartz CoreGraphics, AppleScript, and in-memory screenshots.
+Local Speech: Native macOS say Text-to-Speech synthesis.
 """
 
+import os
+import json
 import base64
 import subprocess
 import threading
+import time
 from typing import Optional, Callable, Dict, Any, List
+
+from dotenv import load_dotenv
+import openai
+from openai import OpenAI
 import ollama
 
 from system_tools import open_website, open_application
+from computer_controller import MacComputerController
+
+# Load environment variables (.env)
+load_dotenv()
+
+# Complete tool definitions for OpenAI function calling
+COMPUTER_USE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_click",
+            "description": "Click or double-click the mouse at normalized coordinates (x, y) on a 0-1000 grid",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {
+                        "type": "integer",
+                        "description": "Horizontal coordinate on a 0-1000 normalized grid (0 = left edge, 1000 = right edge)",
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Vertical coordinate on a 0-1000 normalized grid (0 = top edge, 1000 = bottom edge)",
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Mouse button (default: left)",
+                    },
+                    "double": {
+                        "type": "boolean",
+                        "description": "Set to true for double-click (default: false)",
+                    },
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_type",
+            "description": "Type or paste text instantly into the currently focused input field",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "The exact string of text to insert/type"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_key",
+            "description": "Press a keyboard key or shortcut (e.g. 'enter', 'tab', 'escape', 'space', 'down', 'up', 'cmd+t', 'cmd+w', 'cmd+v', 'cmd+space')",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key_name": {"type": "string", "description": "Name of the key or shortcut to press"},
+                },
+                "required": ["key_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_scroll",
+            "description": "Scroll the screen vertically or horizontally",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "dy": {"type": "integer", "description": "Vertical scroll amount (negative to scroll down, positive to scroll up)"},
+                    "dx": {"type": "integer", "description": "Horizontal scroll amount (default: 0)"},
+                },
+                "required": ["dy"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_website",
+            "description": "Open a website URL in the default browser",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The URL to open, e.g., 'https://youtube.com'"},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_application",
+            "description": "Launch or focus a macOS application",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {"type": "string", "description": "Name of the application, e.g., 'Google Chrome', 'Spotify', 'Notes'"},
+                },
+                "required": ["app_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finish_task",
+            "description": "Complete the computer automation task and return a natural 1-sentence confirmation summary",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "1 concise sentence summarizing what was accomplished on the computer"},
+                },
+                "required": ["summary"],
+            },
+        },
+    },
+]
+
+# Alias for standard conversation tool subset
+OPENAI_TOOLS = COMPUTER_USE_TOOLS
 
 
 class AIAssistant:
-    """Lightweight local AI assistant client integrating Ollama function calling, vision, and macOS native TTS."""
+    """Dual-tier AI assistant client integrating OpenAI API with local Ollama fallback and Computer Use automation."""
 
-    def __init__(self, model: str = "qwen2.5:0.5b", host: str = "http://127.0.0.1:11434"):
-        self.model = model
-        self.vision_model = "qwen2.5vl:3b"
-        self.host = host
-        self.client = ollama.Client(host=self.host)
+    def __init__(
+        self,
+        primary_model: str = "gpt-4o-mini",
+        computer_use_model: str = "gpt-5.4",
+        fallback_host: str = "http://127.0.0.1:11434",
+    ):
+        self.primary_model = primary_model
+        self.computer_use_model = computer_use_model
+        self.agent_model = computer_use_model
+        # Strictly use qwen2.5vl:3b for offline fallback
+        self.fallback_model = "qwen2.5vl:3b"
+        self.fallback_host = fallback_host
+
+        # Computer GUI controller
+        self.controller = MacComputerController()
+
+        # Primary OpenAI Client
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if openai_key and openai_key.strip():
+            self.openai_client: Optional[OpenAI] = OpenAI(api_key=openai_key.strip())
+        else:
+            self.openai_client = None
+
+        # Fallback Local Ollama Client
+        self.ollama_client = ollama.Client(host=self.fallback_host)
+
         self.system_instruction = (
-            "You are FRIDAY, an ultra-fast, direct macOS AI assistant. "
+            "You are FRIDAY, an ultra-fast, direct macOS AI assistant with native computer control capabilities. "
+            f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}. "
             "Respond naturally in 1 to 2 concise sentences suitable for spoken audio. "
             "Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
         )
-        self.tools = [open_website, open_application]
+
         self.available_tools = {
             "open_website": open_website,
             "open_application": open_application,
+            "computer_click": self.controller.click,
+            "computer_type": self.controller.type_text,
+            "computer_key": self.controller.key_press,
+            "computer_scroll": self.controller.scroll,
         }
+        self.tools = [open_website, open_application]
+
         self.context_image_bytes: Optional[bytes] = None
         self.on_context_changed: Optional[Callable[[Optional[bytes]], None]] = None
         self.on_reply_generated: Optional[Callable[[str], None]] = None
+
+        # Concurrency & busy state locking
+        self.is_busy: bool = False
+        self.busy_lock = threading.Lock()
 
     def set_context_image(self, image_bytes: bytes):
         """Stores the most recent captured screen context image bytes."""
@@ -59,12 +227,18 @@ class AIAssistant:
         on_status_change: Optional[Callable[[str], None]] = None,
         on_reply_generated: Optional[Callable[[str], None]] = None,
     ):
-        """Sends prompt (and optional image) to local Ollama in a background thread and speaks the response."""
+        """Sends prompt (and optional image) in a background thread and speaks the response."""
         if not prompt or not prompt.strip():
             return
 
+        with self.busy_lock:
+            if self.is_busy:
+                print(f"[AI] Assistant is currently busy. Discarding overlapping query: '{prompt.strip()}'")
+                return
+            self.is_busy = True
+
         effective_image = image_bytes if image_bytes is not None else self.context_image_bytes
-        # One-time context consumption: clear staged context image immediately upon consumption
+        # One-time context consumption: clear staged context image immediately upon staging
         if self.context_image_bytes is not None:
             self.clear_context_image()
 
@@ -74,6 +248,17 @@ class AIAssistant:
             daemon=True,
         ).start()
 
+    def _is_computer_control_task(self, prompt: str) -> bool:
+        """Determines if a prompt requires autonomous perception-action computer use."""
+        keywords = [
+            "click", "double click", "press", "type in", "type into", "write in",
+            "search on google", "search google for", "search youtube for", "play on spotify",
+            "pause music", "control desktop", "scroll down", "scroll up", "fill out",
+            "navigate to", "open notes and", "close window", "take a note"
+        ]
+        p_lower = prompt.lower()
+        return any(k in p_lower for k in keywords)
+
     def _process_query(
         self,
         prompt: str,
@@ -82,128 +267,65 @@ class AIAssistant:
         on_reply_generated: Optional[Callable[[str], None]] = None,
     ):
         try:
+            # Check if this should run as an autonomous computer agent loop
+            if self._is_computer_control_task(prompt) and image_bytes is None:
+                if self.openai_client is not None:
+                    self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated)
+                    return
+                else:
+                    # Offline fallback guardrail
+                    fallback_msg = "Computer automation requires an active cloud connection and is unavailable offline."
+                    print(f"[AI] {fallback_msg}")
+                    if on_reply_generated:
+                        on_reply_generated(fallback_msg)
+                    elif self.on_reply_generated:
+                        self.on_reply_generated(fallback_msg)
+                    if on_status_change:
+                        on_status_change("SPEAKING")
+                    self._speak(fallback_msg)
+                    return
+
             if on_status_change:
                 on_status_change("THINKING")
 
-            if image_bytes:
-                img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-                user_message: Dict[str, Any] = {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [img_b64],
-                }
-            else:
-                user_message = {
-                    "role": "user",
-                    "content": prompt,
-                }
+            reply: Optional[str] = None
 
-            messages: List[Dict[str, Any]] = [
-                {"role": "system", "content": self.system_instruction},
-                user_message,
-            ]
+            # 1. Attempt Primary OpenAI API Dispatch
+            if self.openai_client is not None:
+                try:
+                    reply = self._query_openai(prompt, image_bytes)
+                except Exception as e:
+                    print(f"[AI] OpenAI unavailable ({e}), falling back to local Qwen 3B...")
+                    reply = None
 
-            target_model = self.vision_model if image_bytes else self.model
+            # 2. Fallback to Local Ollama Engine (Strict Qwen 3B)
+            if reply is None:
+                reply = self._query_ollama(prompt, image_bytes)
 
-            # Execute chat with registered system tools
-            try:
-                response = self.client.chat(
-                    model=target_model,
-                    messages=messages,
-                    tools=self.tools if not image_bytes else None,
-                    options={
-                        "temperature": 0.6,
-                        "num_predict": 100,
-                    },
-                )
-            except Exception as err:
-                if "does not support tools" in str(err).lower():
-                    response = self.client.chat(
-                        model=target_model,
-                        messages=messages,
-                        options={
-                            "temperature": 0.6,
-                            "num_predict": 100,
-                        },
-                    )
-                else:
-                    raise err
-
-            # Check if model requested tool execution
-            tool_calls = getattr(response.message, "tool_calls", None)
-            if not tool_calls and isinstance(response, dict) and "message" in response:
-                tool_calls = response["message"].get("tool_calls", None)
-
-            if tool_calls:
-                for tool_call in tool_calls:
-                    if hasattr(tool_call, "function"):
-                        func_name = tool_call.function.name
-                        func_args = tool_call.function.arguments or {}
-                    elif isinstance(tool_call, dict) and "function" in tool_call:
-                        func_name = tool_call["function"].get("name", "")
-                        func_args = tool_call["function"].get("arguments", {})
-                    else:
-                        continue
-
-                    tool_func = self.available_tools.get(func_name)
-                    if tool_func:
-                        try:
-                            result_text = tool_func(**func_args)
-                        except Exception as te:
-                            result_text = f"Error executing {func_name}: {te}"
-
-                        msg_payload = response.message if hasattr(response, "message") else response["message"]
-                        messages.append(msg_payload)
-                        messages.append({
-                            "role": "tool",
-                            "content": str(result_text),
-                        })
-
-                # Follow-up query to generate final natural spoken response
-                final_response = self.client.chat(
-                    model=target_model,
-                    messages=messages,
-                    options={"temperature": 0.3, "num_predict": 40},
-                )
-                if hasattr(final_response, "message") and hasattr(final_response.message, "content"):
-                    reply = final_response.message.content.strip()
-                elif isinstance(final_response, dict) and "message" in final_response:
-                    reply = final_response["message"].get("content", "").strip()
-                else:
-                    reply = str(final_response).strip()
-            else:
-                if hasattr(response, "message") and hasattr(response.message, "content"):
-                    reply = response.message.content.strip()
-                elif isinstance(response, dict) and "message" in response and "content" in response["message"]:
-                    reply = response["message"]["content"].strip()
-                else:
-                    reply = str(response).strip()
-
-            if not reply:
+            if not reply or not reply.strip():
                 reply = "I didn't receive a response."
+
+            clean_reply = reply.strip()
 
             if on_reply_generated:
                 try:
-                    on_reply_generated(reply)
+                    on_reply_generated(clean_reply)
                 except Exception as cb_err:
                     print(f"[WARN] Error in on_reply_generated: {cb_err}")
             elif self.on_reply_generated:
                 try:
-                    self.on_reply_generated(reply)
+                    self.on_reply_generated(clean_reply)
                 except Exception as cb_err:
                     print(f"[WARN] Error in self.on_reply_generated: {cb_err}")
 
             if on_status_change:
                 on_status_change("SPEAKING")
 
-            self._speak(reply)
-
-            if on_status_change:
-                on_status_change("IDLE")
+            self._speak(clean_reply)
 
         except Exception as e:
-            print(f"[ERROR] Ollama request failed: {e}")
-            error_msg = "Sorry, I had trouble connecting to the local model."
+            print(f"[ERROR] AI Assistant request failed: {e}")
+            error_msg = "Sorry, I had trouble processing that request."
             if on_reply_generated:
                 try:
                     on_reply_generated(error_msg)
@@ -218,8 +340,387 @@ class AIAssistant:
             if on_status_change:
                 on_status_change("SPEAKING")
             self._speak(error_msg)
+
+        finally:
+            with self.busy_lock:
+                self.is_busy = False
             if on_status_change:
                 on_status_change("IDLE")
+
+    def run_computer_agent(
+        self,
+        task_prompt: str,
+        on_status_change: Optional[Callable[[str], None]] = None,
+        on_reply_generated: Optional[Callable[[str], None]] = None,
+        max_iterations: int = 10,
+    ) -> str:
+        """
+        Public entry point for autonomous Perception-Action loop.
+        Applies concurrency locks if invoked directly outside query().
+        """
+        with self.busy_lock:
+            if self.is_busy:
+                print(f"[AI] Assistant is currently busy. Discarding computer task: '{task_prompt}'")
+                return "Assistant is busy."
+            self.is_busy = True
+
+        try:
+            return self._execute_computer_agent_loop(
+                task_prompt, on_status_change, on_reply_generated, max_iterations
+            )
+        finally:
+            with self.busy_lock:
+                self.is_busy = False
+            if on_status_change:
+                on_status_change("IDLE")
+
+    def _execute_computer_agent_loop(
+        self,
+        task_prompt: str,
+        on_status_change: Optional[Callable[[str], None]] = None,
+        on_reply_generated: Optional[Callable[[str], None]] = None,
+        max_iterations: int = 10,
+    ) -> str:
+        """
+        Autonomous Perception-Action loop using gpt-4o vision to control macOS GUI.
+        Perceives screen -> Predicts action -> Executes -> Verifies screenshot outcome -> Repeats until finish_task().
+        """
+        if not self.openai_client:
+            fallback_msg = "Computer automation requires an active cloud connection and is unavailable offline."
+            if on_reply_generated:
+                on_reply_generated(fallback_msg)
+            if on_status_change:
+                on_status_change("SPEAKING")
+            self._speak(fallback_msg)
+            return fallback_msg
+
+        if on_status_change:
+            on_status_change("CONTROLLING")
+
+        print(f"\n[COMPUTER AGENT] Starting desktop GUI automation task: '{task_prompt}'")
+        print(f"[COMPUTER AGENT] Display logical resolution: {self.controller.logical_width}x{self.controller.logical_height}")
+
+        # Capture initial frame to anchor initial perception
+        b64_init, init_w, init_h = self.controller.capture_screen_base64()
+
+        system_prompt = (
+            f"You are an expert desktop GUI automation agent interacting with a macOS screen of logical resolution {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
+            "COORDINATE SYSTEM:\n"
+            "- Provide all coordinates (x, y) on a normalized 0 to 1000 scale:\n"
+            "  * (0, 0) = Top-Left corner\n"
+            "  * (500, 500) = Exact center of the screen\n"
+            "  * (1000, 1000) = Bottom-Right corner\n"
+            "  * Typical browser search/address bars are located horizontally centered near the top: (500, 75) to (500, 120).\n\n"
+            "EXECUTION RULES:\n"
+            "1. VISUAL INSPECTION: Before repeating an action, inspect the previous click location. If the cursor is not blinking in the target input field, adjust coordinates significantly towards the actual target element.\n"
+            "2. DO NOT blindly output the same coordinate twice if the state did not change.\n"
+            "3. Take ONE discrete action per turn (click, type, or press key) to allow observation on the next iteration.\n"
+            "4. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
+        )
+
+        init_img_content = {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/png;base64,{b64_init}"
+            }
+        }
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Task: {task_prompt}\nInitial screen state:"},
+                    init_img_content,
+                ]
+            }
+        ]
+
+        summary = "Completed desktop task."
+
+        for iteration in range(max_iterations):
+            print(f"\n[COMPUTER AGENT] --- Iteration {iteration + 1}/{max_iterations} ---")
+            print(f"[COMPUTER AGENT] Querying {self.computer_use_model} for next UI action...")
+
+            try:
+                try:
+                    response = self.openai_client.chat.completions.create(
+                        model=self.computer_use_model,
+                        messages=messages,
+                        tools=COMPUTER_USE_TOOLS,
+                        tool_choice="auto",
+                        max_completion_tokens=350,
+                        temperature=0.2,
+                    )
+                except Exception as param_err:
+                    if "temperature" in str(param_err).lower() or "unsupported_parameter" in str(param_err).lower():
+                        response = self.openai_client.chat.completions.create(
+                            model=self.computer_use_model,
+                            messages=messages,
+                            tools=COMPUTER_USE_TOOLS,
+                            tool_choice="auto",
+                            max_completion_tokens=350,
+                        )
+                    else:
+                        raise param_err
+            except Exception as e:
+                print(f"[COMPUTER AGENT ERROR] Model inference failed at step {iteration+1}: {e}")
+                break
+
+            msg = response.choices[0].message
+            messages.append(msg)
+
+            if not msg.tool_calls:
+                summary = msg.content or "Completed desktop task."
+                print(f"[COMPUTER AGENT] Model provided direct response without tool calls: {summary}")
+                break
+
+            finished = False
+            print(f"[COMPUTER AGENT] Model emitted {len(msg.tool_calls)} action(s): {[tc.function.name for tc in msg.tool_calls]}")
+
+            for tool_call in msg.tool_calls:
+                func_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                except Exception:
+                    args = {}
+
+                print(f"[COMPUTER AGENT] Executing action: {func_name}({args})")
+
+                if func_name == "finish_task":
+                    summary = args.get("summary", "Task completed.")
+                    finished = True
+                    tool_result = f"Task marked finished: {summary}"
+                elif func_name in self.available_tools:
+                    func = self.available_tools[func_name]
+                    try:
+                        tool_result = func(**args)
+                    except Exception as te:
+                        tool_result = f"Error executing {func_name}: {te}"
+                else:
+                    tool_result = f"Unknown tool: {func_name}"
+
+                print(f"[COMPUTER AGENT] Action result: {tool_result}")
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": f"{tool_result}. Observe the next screenshot to verify outcome.",
+                })
+
+            # Add settling delay so UI animations, focus changes, and popups render before capture
+            time.sleep(0.35)
+
+            if finished:
+                print(f"[COMPUTER AGENT] Goal achieved on iteration {iteration + 1}!")
+                break
+
+            # Capture updated live screenshot for next iteration if loop continues
+            if iteration < max_iterations - 1:
+                b64_next, next_w, next_h = self.controller.capture_screen_base64()
+                print(f"[COMPUTER AGENT] Live screenshot updated: {next_w}x{next_h} px")
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"[Step {iteration+2}]: Updated live screenshot. Verify outcome of previous action and determine next step.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64_next}"
+                            }
+                        }
+                    ]
+                })
+
+        print(f"[COMPUTER AGENT] Final Summary: {summary}\n")
+
+        # Presentation and speech
+        if on_reply_generated:
+            try:
+                on_reply_generated(summary)
+            except Exception:
+                pass
+        elif self.on_reply_generated:
+            try:
+                self.on_reply_generated(summary)
+            except Exception:
+                pass
+
+        if on_status_change:
+            on_status_change("SPEAKING")
+
+        self._speak(summary)
+
+        return summary
+
+    def _query_openai(self, prompt: str, image_bytes: Optional[bytes]) -> str:
+        """Dispatches query to OpenAI gpt-4o-mini with support for function tools and multimodal vision."""
+        if not self.openai_client:
+            raise RuntimeError("OpenAI client not initialized")
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self.system_instruction}
+        ]
+
+        if image_bytes:
+            img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            user_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{img_b64}"
+                    },
+                },
+            ]
+            messages.append({"role": "user", "content": user_content})
+
+            response = self.openai_client.chat.completions.create(
+                model=self.primary_model,
+                messages=messages,
+                max_completion_tokens=150,
+                temperature=0.6,
+            )
+            return response.choices[0].message.content or ""
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+            response = self.openai_client.chat.completions.create(
+                model=self.primary_model,
+                messages=messages,
+                tools=COMPUTER_USE_TOOLS,
+                tool_choice="auto",
+                max_completion_tokens=150,
+                temperature=0.6,
+            )
+
+            msg = response.choices[0].message
+            if msg.tool_calls:
+                messages.append(msg)
+                for tool_call in msg.tool_calls:
+                    func_name = tool_call.function.name
+                    try:
+                        func_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                    except Exception:
+                        func_args = {}
+
+                    tool_func = self.available_tools.get(func_name)
+                    if tool_func:
+                        try:
+                            result_text = tool_func(**func_args)
+                        except Exception as te:
+                            result_text = f"Error executing {func_name}: {te}"
+                    else:
+                        result_text = f"Unknown function {func_name}"
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": str(result_text),
+                    })
+
+                # Follow-up completion for natural spoken confirmation
+                follow_up = self.openai_client.chat.completions.create(
+                    model=self.primary_model,
+                    messages=messages,
+                    max_completion_tokens=60,
+                    temperature=0.3,
+                )
+                return follow_up.choices[0].message.content or ""
+            else:
+                return msg.content or ""
+
+    def _query_ollama(self, prompt: str, image_bytes: Optional[bytes]) -> str:
+        """Dispatches query strictly to local Ollama qwen2.5vl:3b as offline fallback."""
+        # Fallback guardrail: check if computer automation was requested
+        if self._is_computer_control_task(prompt):
+            return "Computer automation requires an active cloud connection and is unavailable offline."
+
+        if image_bytes:
+            img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            user_message: Dict[str, Any] = {
+                "role": "user",
+                "content": prompt,
+                "images": [img_b64],
+            }
+        else:
+            user_message = {
+                "role": "user",
+                "content": prompt,
+            }
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": self.system_instruction},
+            user_message,
+        ]
+
+        try:
+            response = self.ollama_client.chat(
+                model=self.fallback_model,
+                messages=messages,
+                tools=self.tools if not image_bytes else None,
+                options={"temperature": 0.6, "num_predict": 100},
+            )
+        except Exception as err:
+            if "does not support tools" in str(err).lower():
+                response = self.ollama_client.chat(
+                    model=self.fallback_model,
+                    messages=messages,
+                    options={"temperature": 0.6, "num_predict": 100},
+                )
+            else:
+                raise err
+
+        tool_calls = getattr(response.message, "tool_calls", None)
+        if not tool_calls and isinstance(response, dict) and "message" in response:
+            tool_calls = response["message"].get("tool_calls", None)
+
+        if tool_calls:
+            for tool_call in tool_calls:
+                if hasattr(tool_call, "function"):
+                    func_name = tool_call.function.name
+                    func_args = tool_call.function.arguments or {}
+                elif isinstance(tool_call, dict) and "function" in tool_call:
+                    func_name = tool_call["function"].get("name", "")
+                    func_args = tool_call["function"].get("arguments", {})
+                else:
+                    continue
+
+                tool_func = self.available_tools.get(func_name)
+                if tool_func:
+                    try:
+                        result_text = tool_func(**func_args)
+                    except Exception as te:
+                        result_text = f"Error executing {func_name}: {te}"
+
+                    msg_payload = response.message if hasattr(response, "message") else response["message"]
+                    messages.append(msg_payload)
+                    messages.append({
+                        "role": "tool",
+                        "content": str(result_text),
+                    })
+
+            final_response = self.ollama_client.chat(
+                model=self.fallback_model,
+                messages=messages,
+                options={"temperature": 0.3, "num_predict": 40},
+            )
+            if hasattr(final_response, "message") and hasattr(final_response.message, "content"):
+                return final_response.message.content.strip()
+            elif isinstance(final_response, dict) and "message" in final_response:
+                return final_response["message"].get("content", "").strip()
+            else:
+                return str(final_response).strip()
+        else:
+            if hasattr(response, "message") and hasattr(response.message, "content"):
+                return response.message.content.strip()
+            elif isinstance(response, dict) and "message" in response and "content" in response["message"]:
+                return response["message"]["content"].strip()
+            else:
+                return str(response).strip()
 
     def _speak(self, text: str):
         """Zero-latency local speech synthesis via native macOS say command."""

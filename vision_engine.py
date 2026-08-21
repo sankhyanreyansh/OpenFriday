@@ -14,6 +14,7 @@ import time
 import math
 import threading
 import urllib.request
+import re
 from typing import Optional, Tuple, List, Dict, Any
 import numpy as np
 import cv2
@@ -339,27 +340,54 @@ class VisionEngine(QThread):
 
         return hands_landmarks[right_idx], hands_landmarks[left_idx]
 
-    def _on_transcription_complete(self, text: str):
-        """Callback when local Whisper transcription completes for standard dictation."""
-        self.transcription_completed.emit(text)
-
     def _on_ai_status_change(self, status: str):
-        """Callback when AI Assistant changes status (THINKING, SPEAKING, IDLE)."""
+        """Callback when AI Assistant changes status (THINKING, SPEAKING, CONTROLLING, IDLE)."""
         self.ai_status_changed.emit(status)
 
     def _on_ai_reply_generated(self, reply: str):
         """Callback when AI Assistant generates final text response."""
         self.ai_response_generated.emit(reply)
 
-    def _on_ai_transcription_complete(self, text: str):
-        """Callback when local Whisper transcription completes for AI Assistant."""
-        self.transcription_completed.emit(text)
-        if text and text.strip():
-            self.ai_assistant.query(
-                text,
-                on_status_change=self._on_ai_status_change,
-                on_reply_generated=self._on_ai_reply_generated,
-            )
+    def _on_unified_transcription_complete(self, text: str):
+        """
+        Unified transcript intent classification router:
+        Checks if speech begins with or contains 'friday' wake-word.
+        If 'Friday' detected:
+            - Strip 'Friday' from utterance.
+            - If query is empty, reply "I'm listening."
+            - Else, send query to AIAssistant.
+        If 'Friday' not detected:
+            - Inject text directly into active search bar / text field via clipboard paste.
+        """
+        if not text or not text.strip():
+            self.transcription_completed.emit("")
+            return
+
+        raw_text = text.strip()
+        self.transcription_completed.emit(raw_text)
+
+        # Regex for "Friday" or "Hey Friday", e.g. "^(hey\s+)?friday[,\s:!-.]*(.*)$"
+        pattern = r'^(?:hey\s+)?friday[,\s:!-.]*(.*)$'
+        match = re.search(pattern, raw_text, re.IGNORECASE)
+
+        if match:
+            query_prompt = match.group(1).strip()
+            print(f"[WAKE WORD] 'Friday' wake-word detected in utterance: '{raw_text}' -> Query: '{query_prompt}'")
+            if not query_prompt:
+                ack_msg = "I'm listening."
+                self._on_ai_status_change("SPEAKING")
+                self._on_ai_reply_generated(ack_msg)
+                self.ai_assistant._speak(ack_msg)
+                self._on_ai_status_change("IDLE")
+            else:
+                self.ai_assistant.query(
+                    query_prompt,
+                    on_status_change=self._on_ai_status_change,
+                    on_reply_generated=self._on_ai_reply_generated,
+                )
+        else:
+            print(f"[DICTATION] Routing text to desktop dictation: '{raw_text}'")
+            self.dictation_engine._inject_text(raw_text)
 
     def run(self):
         """Main vision processing loop with multi-hand classification and centroid persistence."""
@@ -517,31 +545,18 @@ class VisionEngine(QThread):
                                     self.ai_assistant.set_context_image(img_bytes)
                                     self.context_image_captured.emit(img_bytes)
 
-                    # Handle Voice Dictation & AI Assistant State Transitions
-                    if gesture_state == GestureState.AI_LISTENING:
+                    # Handle Push-to-Talk Voice Dictation & Wake-Word Routing
+                    if gesture_state == GestureState.LISTENING:
                         if not self.is_dictating:
                             self.is_dictating = True
-                            self.current_dictation_mode = "GEMINI"
-                            self.dictation_engine.start_recording()
-                    elif gesture_state == GestureState.LISTENING:
-                        if not self.is_dictating:
-                            self.is_dictating = True
-                            self.current_dictation_mode = "CLIPBOARD"
                             self.dictation_engine.start_recording()
                     else:
                         if self.is_dictating:
-                            mode = self.current_dictation_mode
                             self.is_dictating = False
-                            if mode == "GEMINI":
-                                self.dictation_engine.stop_and_transcribe(
-                                    on_complete_callback=self._on_ai_transcription_complete,
-                                    inject_clipboard=False
-                                )
-                            else:
-                                self.dictation_engine.stop_and_transcribe(
-                                    on_complete_callback=self._on_transcription_complete,
-                                    inject_clipboard=True
-                                )
+                            self.dictation_engine.stop_and_transcribe(
+                                on_complete_callback=self._on_unified_transcription_complete,
+                                inject_clipboard=False
+                            )
 
                 self.gesture_updated.emit(gesture_data)
                 self.fps_updated.emit(fps_smoothing)
