@@ -14,6 +14,7 @@ import threading
 import time
 from typing import Optional, Callable, Dict, Any, List
 
+from PyQt6.QtCore import QObject, pyqtSignal
 from dotenv import load_dotenv
 import openai
 from openai import OpenAI
@@ -24,6 +25,10 @@ from computer_controller import MacComputerController
 
 # Load environment variables (.env)
 load_dotenv()
+
+
+class AIAssistantSignals(QObject):
+    annotations_ready = pyqtSignal(list, str)  # (annotations, spoken_response)
 
 # Complete tool definitions for OpenAI function calling
 COMPUTER_USE_TOOLS = [
@@ -131,6 +136,91 @@ COMPUTER_USE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "annotate_screen",
+            "strict": True,
+            "description": "Draw colored visual bounding boxes and callout explanation cards across the user's screen. Use whenever the user asks to explain diagrams, circuits, code, UI, or find elements on screen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "spoken_response": {
+                        "type": "string",
+                        "description": "Brief 1-2 sentence spoken explanation for TTS audio."
+                    },
+                    "annotations": {
+                        "type": "array",
+                        "description": "List of at least 1 to 5 visual bounding boxes and explanations corresponding to target regions on screen. NEVER return an empty array.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "box_2d": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "[ymin, xmin, ymax, xmax] on a 0-1000 normalized grid."
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short title (e.g., 'Encoder Block', 'Multi-Head Attention', 'Inputs')."
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "1 sentence explanation inside the floating callout card."
+                                },
+                                "color": {
+                                    "type": "string",
+                                    "description": "Hex color code (e.g., '#ef4444', '#22c55e', '#3b82f6', '#eab308', '#a855f7')."
+                                }
+                            },
+                            "required": ["box_2d", "label", "text", "color"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["spoken_response", "annotations"],
+                "additionalProperties": False
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "start_computer_automation",
+            "description": "Trigger when the user asks you to interact with, click, edit, write into, or manipulate any application, editor, browser, or GUI element on their screen.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "goal": {
+                        "type": "string",
+                        "description": "The exact multi-step task goal to achieve on the user's desktop."
+                    },
+                    "initial_action_plan": {
+                        "type": "string",
+                        "description": "Short explanation of the steps you plan to take."
+                    }
+                },
+                "required": ["goal"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_user_help",
+            "description": "Call this tool if you get stuck, cannot find an element after retrying, encounter a CAPTCHA/2FA, or need the user to position the cursor or focus a specific window.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "explanation": {
+                        "type": "string",
+                        "description": "Clear explanation spoken to the user describing what you need them to do."
+                    }
+                },
+                "required": ["explanation"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "finish_task",
             "description": "Complete the computer automation task and return a natural 1-sentence confirmation summary",
             "parameters": {
@@ -177,11 +267,24 @@ class AIAssistant:
         # Fallback Local Ollama Client
         self.ollama_client = ollama.Client(host=self.fallback_host)
 
+        # Dedicated Qt GUI Signals
+        self.signals = AIAssistantSignals()
+
         self.system_instruction = (
-            "You are FRIDAY, an ultra-fast, direct macOS AI assistant with native computer control capabilities. "
-            f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}. "
-            "Respond naturally in 1 to 2 concise sentences suitable for spoken audio. "
-            "Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
+            "You are FRIDAY, an autonomous desktop assistant with full macOS GUI automation (Computer Use) and AR visual annotation capabilities.\n\n"
+            f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
+            "DECISION GUIDELINES:\n"
+            "1. DESKTOP INTERACTION VS. DIRECT ANSWER:\n"
+            "   - If the user asks for code, writing, editing, typing, clicking, or actions relative to something on their screen (e.g., 'write this code below the hello world statement in my editor', 'clear the text in this compiler', 'click on cell B3', 'reply to this message', 'open app and do X'):\n"
+            "     -> You MUST call `start_computer_automation` to inspect the screen and execute the typing/clicks directly into their app.\n"
+            "   - If the user asks a purely theoretical question, general knowledge, translation, or conversational query with no screen interaction:\n"
+            "     -> Answer directly in 1-2 concise sentences for spoken audio.\n"
+            "   - If the user asks to visually explain a diagram, architecture, circuit, or find/highlight items on screen:\n"
+            "     -> Call `annotate_screen`.\n\n"
+            "2. COMPUTER USE RECOVERY:\n"
+            "   - Always verify each action in the following screenshot.\n"
+            "   - If you struggle to locate an element after 2 attempts or require manual credentials/focus/CAPTCHA, call `request_user_help` to let the user know what assistance is needed rather than looping endlessly.\n\n"
+            "3. Spoken Audio: Respond naturally and concisely in 1 to 2 sentences suitable for spoken audio. Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
         )
 
         self.available_tools = {
@@ -197,6 +300,7 @@ class AIAssistant:
         self.context_image_bytes: Optional[bytes] = None
         self.on_context_changed: Optional[Callable[[Optional[bytes]], None]] = None
         self.on_reply_generated: Optional[Callable[[str], None]] = None
+        self.on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None
 
         # Concurrency & busy state locking
         self.is_busy: bool = False
@@ -220,12 +324,24 @@ class AIAssistant:
             except Exception as e:
                 print(f"[WARN] Error in context changed callback: {e}")
 
+    def _is_visual_query(self, prompt: str) -> bool:
+        """Determines if a prompt implies inspecting or explaining visual elements on the desktop."""
+        keywords = [
+            "screen", "diagram", "circuit", "ui", "look at", "what is this", "what's this",
+            "explain this", "where is", "find", "highlight", "annotate", "code", "window",
+            "display", "image", "chart", "table", "button", "icon", "read this", "summarize this",
+            "what am i looking at", "on my screen", "what do you see", "show me", "point to"
+        ]
+        p_lower = prompt.lower()
+        return any(k in p_lower for k in keywords)
+
     def query(
         self,
         prompt: str,
         image_bytes: Optional[bytes] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
         on_reply_generated: Optional[Callable[[str], None]] = None,
+        on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
         """Sends prompt (and optional image) in a background thread and speaks the response."""
         if not prompt or not prompt.strip():
@@ -238,13 +354,23 @@ class AIAssistant:
             self.is_busy = True
 
         effective_image = image_bytes if image_bytes is not None else self.context_image_bytes
+
+        # Universal screen perception: always capture live full-screen context if no image is staged
+        if effective_image is None:
+            try:
+                b64_snap, _, _ = self.controller.capture_screen_base64()
+                effective_image = base64.b64decode(b64_snap)
+                print(f"[AI] Universal screen awareness: Captured live full-screen context for '{prompt.strip()}'")
+            except Exception as e:
+                print(f"[AI WARN] Automatic screen capture error: {e}")
+
         # One-time context consumption: clear staged context image immediately upon staging
         if self.context_image_bytes is not None:
             self.clear_context_image()
 
         threading.Thread(
             target=self._process_query,
-            args=(prompt.strip(), effective_image, on_status_change, on_reply_generated),
+            args=(prompt.strip(), effective_image, on_status_change, on_reply_generated, on_annotations_generated),
             daemon=True,
         ).start()
 
@@ -254,7 +380,9 @@ class AIAssistant:
             "click", "double click", "press", "type in", "type into", "write in",
             "search on google", "search google for", "search youtube for", "play on spotify",
             "pause music", "control desktop", "scroll down", "scroll up", "fill out",
-            "navigate to", "open notes and", "close window", "take a note"
+            "navigate to", "open notes and", "close window", "take a note", "go to",
+            "compose", "in the search bar", "search bar", "in the subject", "in the content",
+            "first link", "second link", "enter", "hit enter"
         ]
         p_lower = prompt.lower()
         return any(k in p_lower for k in keywords)
@@ -265,10 +393,11 @@ class AIAssistant:
         image_bytes: Optional[bytes],
         on_status_change: Optional[Callable[[str], None]],
         on_reply_generated: Optional[Callable[[str], None]] = None,
+        on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
         try:
-            # Check if this should run as an autonomous computer agent loop
-            if self._is_computer_control_task(prompt) and image_bytes is None:
+            # Check if this should run as an autonomous computer agent loop directly
+            if self._is_computer_control_task(prompt):
                 if self.openai_client is not None:
                     self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated)
                     return
@@ -293,7 +422,13 @@ class AIAssistant:
             # 1. Attempt Primary OpenAI API Dispatch
             if self.openai_client is not None:
                 try:
-                    reply = self._query_openai(prompt, image_bytes)
+                    reply = self._query_openai(
+                        prompt,
+                        image_bytes,
+                        on_annotations_generated,
+                        on_status_change=on_status_change,
+                        on_reply_generated=on_reply_generated,
+                    )
                 except Exception as e:
                     print(f"[AI] OpenAI unavailable ({e}), falling back to local Qwen 3B...")
                     reply = None
@@ -411,10 +546,18 @@ class AIAssistant:
             "  * (500, 500) = Exact center of the screen\n"
             "  * (1000, 1000) = Bottom-Right corner\n"
             "  * Typical browser search/address bars are located horizontally centered near the top: (500, 75) to (500, 120).\n\n"
-            "EXECUTION RULES:\n"
-            "1. VISUAL INSPECTION: Before repeating an action, inspect the previous click location. If the cursor is not blinking in the target input field, adjust coordinates significantly towards the actual target element.\n"
-            "2. DO NOT blindly output the same coordinate twice if the state did not change.\n"
-            "3. Take ONE discrete action per turn (click, type, or press key) to allow observation on the next iteration.\n"
+            "COMPUTER USE AGENT INSTRUCTIONS:\n"
+            "1. END-TO-END AUTONOMY: When given a multi-step request (e.g. 'Open Chrome, go to YouTube, and search jazz', or 'type in search bar, press enter, and click first link'):\n"
+            "   - Execute all necessary actions sequentially across iterations.\n"
+            "   - DO NOT stop after step 1 to ask for user confirmation or input.\n"
+            "   - Continue iterating through the perception-action loop until the entire objective is completed.\n"
+            "   - Only call `finish_task` when the final goal is fully achieved and visible on screen.\n\n"
+            "2. MANDATORY VISUAL VERIFICATION:\n"
+            "   - On every iteration (from iteration 2 onwards), first inspect the latest screenshot to verify that your previous action produced the intended UI change.\n"
+            "   - If you clicked a search box, verify that the cursor is active before typing.\n"
+            "   - If you typed text, confirm the text actually appears in the field before pressing Enter.\n"
+            "   - If an action missed or failed, adjust your normalized coordinates and retry immediately.\n\n"
+            "3. Take discrete actions per turn (click, type, or press key) to allow observation on the next iteration.\n"
             "4. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
         )
 
@@ -471,9 +614,29 @@ class AIAssistant:
             messages.append(msg)
 
             if not msg.tool_calls:
-                summary = msg.content or "Completed desktop task."
-                print(f"[COMPUTER AGENT] Model provided direct response without tool calls: {summary}")
-                break
+                text_content = msg.content or ""
+                print(f"[COMPUTER AGENT] Model returned text without tool calls: {text_content}")
+                if iteration < max_iterations - 1:
+                    b64_next, next_w, next_h = self.controller.capture_screen_base64()
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Continue executing the next action to achieve the goal. Do not stop until calling finish_task.",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{b64_next}"
+                                }
+                            }
+                        ]
+                    })
+                    continue
+                else:
+                    summary = text_content or "Completed desktop task."
+                    break
 
             finished = False
             print(f"[COMPUTER AGENT] Model emitted {len(msg.tool_calls)} action(s): {[tc.function.name for tc in msg.tool_calls]}")
@@ -491,6 +654,14 @@ class AIAssistant:
                     summary = args.get("summary", "Task completed.")
                     finished = True
                     tool_result = f"Task marked finished: {summary}"
+                elif func_name == "request_user_help":
+                    explanation = args.get("explanation", "I need your assistance to proceed.")
+                    print(f"[COMPUTER AGENT] request_user_help triggered: {explanation}")
+                    summary = explanation
+                    finished = True
+                    tool_result = f"Paused computer agent to request user help: {explanation}"
+                    if on_status_change:
+                        on_status_change("WAITING")
                 elif func_name in self.available_tools:
                     func = self.available_tools[func_name]
                     try:
@@ -512,7 +683,7 @@ class AIAssistant:
             time.sleep(0.35)
 
             if finished:
-                print(f"[COMPUTER AGENT] Goal achieved on iteration {iteration + 1}!")
+                print(f"[COMPUTER AGENT] Goal achieved / paused on iteration {iteration + 1}!")
                 break
 
             # Capture updated live screenshot for next iteration if loop continues
@@ -549,15 +720,22 @@ class AIAssistant:
             except Exception:
                 pass
 
-        if on_status_change:
+        if on_status_change and not (func_name == "request_user_help" if 'func_name' in locals() else False):
             on_status_change("SPEAKING")
 
         self._speak(summary)
 
         return summary
 
-    def _query_openai(self, prompt: str, image_bytes: Optional[bytes]) -> str:
-        """Dispatches query to OpenAI gpt-4o-mini with support for function tools and multimodal vision."""
+    def _query_openai(
+        self,
+        prompt: str,
+        image_bytes: Optional[bytes],
+        on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+        on_status_change: Optional[Callable[[str], None]] = None,
+        on_reply_generated: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Dispatches query to OpenAI gpt-4o-mini / gpt-5.4 with support for function tools and multimodal vision."""
         if not self.openai_client:
             raise RuntimeError("OpenAI client not initialized")
 
@@ -577,36 +755,75 @@ class AIAssistant:
                 },
             ]
             messages.append({"role": "user", "content": user_content})
-
-            response = self.openai_client.chat.completions.create(
-                model=self.primary_model,
-                messages=messages,
-                max_completion_tokens=150,
-                temperature=0.6,
-            )
-            return response.choices[0].message.content or ""
         else:
             messages.append({"role": "user", "content": prompt})
 
+        target_model = self.computer_use_model if image_bytes else self.primary_model
+        print(f"[AI] Dispatching query to {target_model} (multimodal={image_bytes is not None})...")
+
+        try:
             response = self.openai_client.chat.completions.create(
-                model=self.primary_model,
+                model=target_model,
                 messages=messages,
                 tools=COMPUTER_USE_TOOLS,
                 tool_choice="auto",
-                max_completion_tokens=150,
-                temperature=0.6,
+                max_completion_tokens=400,
+                temperature=0.2,
             )
+        except Exception as err:
+            if "temperature" in str(err).lower() or "unsupported_parameter" in str(err).lower():
+                response = self.openai_client.chat.completions.create(
+                    model=target_model,
+                    messages=messages,
+                    tools=COMPUTER_USE_TOOLS,
+                    tool_choice="auto",
+                    max_completion_tokens=400,
+                )
+            else:
+                raise err
 
-            msg = response.choices[0].message
-            if msg.tool_calls:
-                messages.append(msg)
-                for tool_call in msg.tool_calls:
-                    func_name = tool_call.function.name
-                    try:
-                        func_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                    except Exception:
-                        func_args = {}
+        msg = response.choices[0].message
+        if msg.tool_calls:
+            messages.append(msg)
+            spoken_summary = None
 
+            for tool_call in msg.tool_calls:
+                func_name = tool_call.function.name
+                try:
+                    func_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                except Exception:
+                    func_args = {}
+
+                if func_name == "start_computer_automation":
+                    goal = func_args.get("goal", prompt)
+                    print(f"[AI] Model initiated start_computer_automation: goal='{goal}'")
+                    return self._execute_computer_agent_loop(
+                        task_prompt=goal,
+                        on_status_change=on_status_change,
+                        on_reply_generated=on_reply_generated,
+                    )
+                elif func_name == "request_user_help":
+                    explanation = func_args.get("explanation", "I need your assistance to proceed.")
+                    if on_status_change:
+                        on_status_change("WAITING")
+                    return explanation
+                elif func_name == "annotate_screen":
+                    spoken_summary = func_args.get("spoken_response", "Here is the visual breakdown.")
+                    anns = func_args.get("annotations", [])
+                    print(f"[AI] annotate_screen tool triggered with {len(anns)} annotations")
+                    if len(anns) == 0:
+                        print("[AI WARNING] Received 0 annotations, falling back to full-card response.")
+                    else:
+                        try:
+                            self.signals.annotations_ready.emit(anns, spoken_summary)
+                        except Exception as sig_err:
+                            print(f"[AI WARN] Failed to emit annotations_ready signal: {sig_err}")
+                        if on_annotations_generated:
+                            on_annotations_generated(anns)
+                        elif self.on_annotations_generated:
+                            self.on_annotations_generated(anns)
+                    result_text = f"Annotations displayed on screen: {spoken_summary}"
+                else:
                     tool_func = self.available_tools.get(func_name)
                     if tool_func:
                         try:
@@ -616,22 +833,28 @@ class AIAssistant:
                     else:
                         result_text = f"Unknown function {func_name}"
 
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": str(result_text),
-                    })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": str(result_text),
+                })
 
-                # Follow-up completion for natural spoken confirmation
+            if spoken_summary:
+                return spoken_summary
+
+            # Follow-up completion for natural spoken confirmation
+            try:
                 follow_up = self.openai_client.chat.completions.create(
-                    model=self.primary_model,
+                    model=target_model,
                     messages=messages,
-                    max_completion_tokens=60,
-                    temperature=0.3,
+                    max_completion_tokens=100,
+                    temperature=0.2,
                 )
                 return follow_up.choices[0].message.content or ""
-            else:
-                return msg.content or ""
+            except Exception:
+                return "Completed request."
+        else:
+            return msg.content or ""
 
     def _query_ollama(self, prompt: str, image_bytes: Optional[bytes]) -> str:
         """Dispatches query strictly to local Ollama qwen2.5vl:3b as offline fallback."""

@@ -17,6 +17,7 @@ from PyQt6.QtGui import QIcon, QAction, QGuiApplication
 from mouse_controller import MouseController
 from vision_engine import VisionEngine
 from overlay_window import TransparentOverlay
+from annotation_overlay import ARAnnotationOverlay
 from hud_sidebar import GlassmorphicHUDPanel, HUDContextCard
 import permissions
 
@@ -51,6 +52,7 @@ def main():
         hud_pill = GlassmorphicHUDPanel() if not args.no_sidebar else None
         hud_context_card = HUDContextCard(anchor_pill=hud_pill) if not args.no_sidebar else None
         reticle_overlay = TransparentOverlay() if not args.no_overlay else None
+        annotation_overlay = ARAnnotationOverlay() if not args.no_overlay else None
 
         # 2. Background Vision Engine
         vision_thread = VisionEngine(camera_id=args.camera, mouse_controller=mouse_ctrl)
@@ -70,6 +72,12 @@ def main():
         if reticle_overlay:
             vision_thread.gesture_updated.connect(reticle_overlay.update_gesture_data)
             reticle_overlay.dismiss_radial_requested.connect(vision_thread.dismiss_radial_menu)
+
+        if annotation_overlay:
+            vision_thread.ai_assistant.signals.annotations_ready.connect(
+                lambda anns, spoken: annotation_overlay.display_annotations(anns, spoken)
+            )
+            vision_thread.annotations_generated.connect(annotation_overlay.display_annotations)
 
         # 4. macOS Menu Bar / System Tray
         tray = QSystemTrayIcon()
@@ -109,6 +117,8 @@ def main():
             mouse_ctrl.release_all()
             if reticle_overlay:
                 reticle_overlay.close()
+            if annotation_overlay:
+                annotation_overlay.close()
             if hud_pill:
                 hud_pill.close()
             if hud_context_card:

@@ -110,6 +110,7 @@ class VisionEngine(QThread):
     ai_status_changed = pyqtSignal(str)
     context_image_captured = pyqtSignal(bytes)
     ai_response_generated = pyqtSignal(str)
+    annotations_generated = pyqtSignal(list)
 
     def __init__(
         self,
@@ -126,6 +127,10 @@ class VisionEngine(QThread):
         # Local Voice Dictation Engine (faster-whisper) & Local Ollama AI Assistant
         self.dictation_engine = VoiceDictationEngine(model_size="base.en")
         self.ai_assistant = AIAssistant()
+        self.ai_assistant.on_annotations_generated = lambda anns: self.annotations_generated.emit(anns)
+        self.ai_assistant.signals.annotations_ready.connect(
+            lambda anns, spoken: self.annotations_generated.emit(anns)
+        )
         self.is_dictating = False
         self.current_dictation_mode: str = "CLIPBOARD"
         
@@ -384,6 +389,7 @@ class VisionEngine(QThread):
                     query_prompt,
                     on_status_change=self._on_ai_status_change,
                     on_reply_generated=self._on_ai_reply_generated,
+                    on_annotations_generated=lambda anns: self.annotations_generated.emit(anns),
                 )
         else:
             print(f"[DICTATION] Routing text to desktop dictation: '{raw_text}'")
