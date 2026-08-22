@@ -22,6 +22,7 @@ import ollama
 
 from system_tools import open_website, open_application
 from computer_controller import MacComputerController
+from memory_vault import MemoryVault
 
 # Load environment variables (.env)
 load_dotenv()
@@ -51,11 +52,11 @@ COMPUTER_USE_TOOLS = [
                     "button": {
                         "type": "string",
                         "enum": ["left", "right"],
-                        "description": "Mouse button (default: left)",
+                        "description": "Mouse button to click (default: left)",
                     },
-                    "double": {
+                    "double_click": {
                         "type": "boolean",
-                        "description": "Set to true for double-click (default: false)",
+                        "description": "Whether to perform a double click (default: false)",
                     },
                 },
                 "required": ["x", "y"],
@@ -66,11 +67,15 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "computer_type",
-            "description": "Type or paste text instantly into the currently focused input field",
+            "description": "Type text into the currently focused window or field via native clipboard paste injection",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "The exact string of text to insert/type"},
+                    "text": {"type": "string", "description": "The exact string of text to type or paste"},
+                    "press_enter": {
+                        "type": "boolean",
+                        "description": "Whether to press the Return/Enter key immediately after typing (default: false)",
+                    },
                 },
                 "required": ["text"],
             },
@@ -80,13 +85,22 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "computer_key",
-            "description": "Press a keyboard key or shortcut (e.g. 'enter', 'tab', 'escape', 'space', 'down', 'up', 'cmd+t', 'cmd+w', 'cmd+v', 'cmd+space')",
+            "description": "Press a special keyboard key or keyboard shortcut combination",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "key_name": {"type": "string", "description": "Name of the key or shortcut to press"},
+                    "key": {
+                        "type": "string",
+                        "enum": ["enter", "escape", "tab", "space", "backspace", "up", "down", "left", "right"],
+                        "description": "The key name to press",
+                    },
+                    "modifiers": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["command", "shift", "control", "option"]},
+                        "description": "Modifier keys to hold down (e.g. ['command'] for Cmd+Key)",
+                    },
                 },
-                "required": ["key_name"],
+                "required": ["key"],
             },
         },
     },
@@ -94,14 +108,16 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "computer_scroll",
-            "description": "Scroll the screen vertically or horizontally",
+            "description": "Scroll the active window or view vertically",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "dy": {"type": "integer", "description": "Vertical scroll amount (negative to scroll down, positive to scroll up)"},
-                    "dx": {"type": "integer", "description": "Horizontal scroll amount (default: 0)"},
+                    "delta_y": {
+                        "type": "integer",
+                        "description": "Scroll amount (positive = scroll up, negative = scroll down)",
+                    }
                 },
-                "required": ["dy"],
+                "required": ["delta_y"],
             },
         },
     },
@@ -109,11 +125,11 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_website",
-            "description": "Open a website URL in the default browser",
+            "description": "Open a website URL in the user's default web browser",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "url": {"type": "string", "description": "The URL to open, e.g., 'https://youtube.com'"},
+                    "url": {"type": "string", "description": "The full web address URL (e.g. https://www.google.com)"},
                 },
                 "required": ["url"],
             },
@@ -123,11 +139,11 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "open_application",
-            "description": "Launch or focus a macOS application",
+            "description": "Launch or activate a macOS application by name",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "app_name": {"type": "string", "description": "Name of the application, e.g., 'Google Chrome', 'Spotify', 'Notes'"},
+                    "app_name": {"type": "string", "description": "The macOS application name (e.g. Safari, Notes, Terminal, Spotify)"},
                 },
                 "required": ["app_name"],
             },
@@ -137,46 +153,44 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "annotate_screen",
-            "strict": True,
-            "description": "Draw colored visual bounding boxes and callout explanation cards across the user's screen. Use whenever the user asks to explain diagrams, circuits, code, UI, or find elements on screen.",
+            "description": "Visually annotate, highlight, label, or point to specific elements, text, buttons, diagram parts, or regions on the user's screen with high-precision bounding boxes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "spoken_response": {
                         "type": "string",
-                        "description": "Brief 1-2 sentence spoken explanation for TTS audio."
+                        "description": "Natural 1-2 sentence spoken summary explaining the highlighted items to the user."
                     },
                     "annotations": {
                         "type": "array",
-                        "description": "List of at least 1 to 5 visual bounding boxes and explanations corresponding to target regions on screen. NEVER return an empty array.",
+                        "description": "List of visual bounding box annotations to draw over the screen.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "box_2d": {
                                     "type": "array",
                                     "items": {"type": "integer"},
-                                    "description": "[ymin, xmin, ymax, xmax] on a 0-1000 normalized grid."
+                                    "description": "Bounding box coordinates in [ymin, xmin, ymax, xmax] on a normalized 0 to 1000 scale.",
                                 },
                                 "label": {
                                     "type": "string",
-                                    "description": "Short title (e.g., 'Encoder Block', 'Multi-Head Attention', 'Inputs')."
+                                    "description": "Short title label for the annotated element (e.g. 'Submit Button', 'Main Power Supply', 'Syntax Error').",
                                 },
-                                "text": {
+                                "description": {
                                     "type": "string",
-                                    "description": "1 sentence explanation inside the floating callout card."
+                                    "description": "Brief 1-sentence explanation of what this element is or does.",
                                 },
                                 "color": {
                                     "type": "string",
-                                    "description": "Hex color code (e.g., '#ef4444', '#22c55e', '#3b82f6', '#eab308', '#a855f7')."
+                                    "enum": ["cyan", "amber", "emerald", "rose", "violet"],
+                                    "description": "Accent color for the card and box outline.",
                                 }
                             },
-                            "required": ["box_2d", "label", "text", "color"],
-                            "additionalProperties": False
+                            "required": ["box_2d", "label"]
                         }
                     }
                 },
-                "required": ["spoken_response", "annotations"],
-                "additionalProperties": False
+                "required": ["spoken_response", "annotations"]
             }
         }
     },
@@ -184,7 +198,7 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "start_computer_automation",
-            "description": "Trigger when the user asks you to interact with, click, edit, write into, or manipulate any application, editor, browser, or GUI element on their screen.",
+            "description": "Trigger this when the user asks to write code, edit text, type, click, or perform multi-step actions on their screen.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -198,6 +212,28 @@ COMPUTER_USE_TOOLS = [
                     }
                 },
                 "required": ["goal"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_user_memory",
+            "description": "Save important user facts, personal preferences, project details, or explicit notes into the local markdown memory vault for long-term recall.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category_file": {
+                        "type": "string",
+                        "enum": ["user_profile.md", "projects.md", "notes.md"],
+                        "description": "The markdown file to store the memory in."
+                    },
+                    "fact_or_preference": {
+                        "type": "string",
+                        "description": "Concise, factual statement to remember (e.g. 'User prefers dark mode', 'User sister birthday is June 4')."
+                    }
+                },
+                "required": ["category_file", "fact_or_preference"]
             }
         }
     },
@@ -240,6 +276,13 @@ class AIAssistant:
         # Computer GUI controller
         self.controller = MacComputerController()
 
+        # Long-Term Markdown Memory Vault
+        self.memory_vault = MemoryVault()
+
+        # In-Session Rolling Conversation History
+        self.conversation_history: List[Dict[str, Any]] = []
+        self.max_history_turns: int = 12
+
         # Autonomous Computer Control & Abort state
         self.is_controlling_desktop: bool = False
         self.abort_event = threading.Event()
@@ -258,7 +301,7 @@ class AIAssistant:
         self.signals = AIAssistantSignals()
 
         self.system_instruction = (
-            "You are FRIDAY, an autonomous desktop assistant with full macOS GUI automation (Computer Use) and AR visual annotation capabilities.\n\n"
+            "You are FRIDAY, an autonomous desktop assistant with full macOS GUI automation (Computer Use), Long-Term Memory, and AR visual annotation capabilities.\n\n"
             f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
             "VISUAL COORDINATE REFERENCE:\n"
             "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes.\n"
@@ -269,6 +312,8 @@ class AIAssistant:
             "1. DESKTOP INTERACTION VS. DIRECT ANSWER:\n"
             "   - If the user asks for code, writing, editing, typing, clicking, or actions relative to something on their screen (e.g., 'write this code below the hello world statement in my editor', 'clear the text in this compiler', 'click on cell B3', 'reply to this message', 'open app and do X'):\n"
             "     -> You MUST call `start_computer_automation` to inspect the screen and execute the typing/clicks directly into their app.\n"
+            "   - If the user asks you to remember, save, or store a personal fact, preference, note, or project detail:\n"
+            "     -> Call `save_user_memory` with appropriate category_file and fact_or_preference.\n"
             "   - If the user asks a purely theoretical question, general knowledge, translation, or conversational query with no screen interaction:\n"
             "     -> Answer directly in 1-2 concise sentences for spoken audio.\n"
             "   - If the user asks to visually explain a diagram, architecture, circuit, or find/highlight items on screen:\n"
@@ -286,6 +331,7 @@ class AIAssistant:
             "computer_type": self.controller.type_text,
             "computer_key": self.controller.key_press,
             "computer_scroll": self.controller.scroll,
+            "save_user_memory": lambda category_file, fact_or_preference: self.memory_vault.save_memory(category_file, fact_or_preference),
         }
         self.tools = [open_website, open_application]
 
@@ -297,6 +343,10 @@ class AIAssistant:
         # Concurrency & busy state locking
         self.is_busy: bool = False
         self.busy_lock = threading.Lock()
+
+    def clear_history(self):
+        """Clears in-session rolling conversation history."""
+        self.conversation_history.clear()
 
     def abort_computer_agent(self):
         """Signals the computer agent loop to immediately halt operations."""
@@ -332,6 +382,78 @@ class AIAssistant:
         p_lower = prompt.lower()
         return any(k in p_lower for k in keywords)
 
+    def classify_query(self, user_query: str) -> Dict[str, Any]:
+        """
+        Fast pre-flight query router using gpt-4o-mini structured JSON (with local heuristic fallback):
+        - target_model: 'gpt-4o-mini' or 'gpt-5.4'
+        - requires_screen_context: bool (True only if query inspects on-screen diagrams, code, UI, or windows)
+        - is_computer_use: bool (True if physical GUI action requested)
+        - requires_memory_retrieval: bool (True if referencing user facts/preferences)
+        - memory_search_query: str (Search terms for MemoryVault RAG)
+        """
+        if not user_query or not user_query.strip():
+            return {
+                "target_model": self.primary_model,
+                "requires_screen_context": False,
+                "is_computer_use": False,
+                "requires_memory_retrieval": False,
+                "memory_search_query": "",
+            }
+
+        # Attempt fast gpt-4o-mini structured triage call if online
+        if self.openai_client is not None:
+            try:
+                router_messages = [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a fast, low-latency triage router for FRIDAY, an AI desktop assistant. "
+                            "Analyze the user's utterance and return a JSON object with:\n"
+                            "- \"target_model\": \"gpt-4o-mini\" (for conversation, facts, math, basic questions, memory recall, fast tool calling) or \"gpt-5.4\" (for deep visual inspection of diagrams/circuits, code on screen, complex UI annotation).\n"
+                            "- \"requires_screen_context\": boolean. Set to TRUE ONLY if the user is asking about visual content currently visible on their screen (e.g. 'what is on my screen', 'explain this diagram', 'read the text in this window', 'where is the button'). Set to FALSE for math (e.g. 'what is 7+7'), general knowledge, conversations, memory queries, or questions with no visual reference.\n"
+                            "- \"is_computer_use\": boolean. Set to TRUE if the user asks you to physically click, type, automate an application, search Google/YouTube, or control their desktop.\n"
+                            "- \"requires_memory_retrieval\": boolean. Set to TRUE if the user asks about their personal info, preferences, past saved notes, or asks you to remember something.\n"
+                            "- \"memory_search_query\": string. Concise keywords for memory lookup (or empty string if not needed)."
+                        )
+                    },
+                    {"role": "user", "content": user_query}
+                ]
+                resp = self.openai_client.chat.completions.create(
+                    model=self.primary_model,
+                    messages=router_messages,
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=80,
+                    temperature=0.0,
+                )
+                result = json.loads(resp.choices[0].message.content or "{}")
+                target_model = result.get("target_model", self.primary_model)
+                if target_model not in ("gpt-4o-mini", "gpt-5.4"):
+                    target_model = self.primary_model
+                return {
+                    "target_model": target_model,
+                    "requires_screen_context": bool(result.get("requires_screen_context", False)),
+                    "is_computer_use": bool(result.get("is_computer_use", False)),
+                    "requires_memory_retrieval": bool(result.get("requires_memory_retrieval", False)),
+                    "memory_search_query": str(result.get("memory_search_query", "")),
+                }
+            except Exception as e:
+                print(f"[AI ROUTER WARN] gpt-4o-mini router call failed ({e}), using heuristic fallback.")
+
+        # Local Heuristic Fallback
+        is_computer = self._is_computer_control_task(user_query)
+        is_visual = self._is_visual_query(user_query)
+        is_memory = any(k in user_query.lower() for k in [
+            "name", "birthday", "prefer", "favorite", "remember", "saved",
+            "who am i", "who i am", "what do you know", "notes", "profile", "sister", "brother"
+        ])
+        return {
+            "target_model": self.computer_use_model if is_visual else self.primary_model,
+            "requires_screen_context": is_visual,
+            "is_computer_use": is_computer,
+            "requires_memory_retrieval": is_memory,
+            "memory_search_query": user_query if is_memory else "",
+        }
+
     def query(
         self,
         prompt: str,
@@ -340,7 +462,7 @@ class AIAssistant:
         on_reply_generated: Optional[Callable[[str], None]] = None,
         on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
-        """Sends prompt (and optional image) in a background thread and speaks the response."""
+        """Sends prompt (with selective screen context) in a background thread and speaks the response."""
         if not prompt or not prompt.strip():
             return
 
@@ -351,15 +473,6 @@ class AIAssistant:
             self.is_busy = True
 
         effective_image = image_bytes if image_bytes is not None else self.context_image_bytes
-
-        # Universal screen perception: always capture live full-screen context if no image is staged
-        if effective_image is None:
-            try:
-                b64_snap, _, _ = self.controller.capture_screen_base64()
-                effective_image = base64.b64decode(b64_snap)
-                print(f"[AI] Universal screen awareness: Captured live full-screen context for '{prompt.strip()}'")
-            except Exception as e:
-                print(f"[AI WARN] Automatic screen capture error: {e}")
 
         # One-time context consumption: clear staged context image immediately upon staging
         if self.context_image_bytes is not None:
@@ -393,13 +506,20 @@ class AIAssistant:
         on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
         try:
-            # Check if this should run as an autonomous computer agent loop directly
-            if self._is_computer_control_task(prompt):
+            # 1. Pre-Flight Intent Classification
+            classification = self.classify_query(prompt)
+            print(f"[AI ROUTER] Triage: target={classification.get('target_model')}, screen={classification.get('requires_screen_context')}, computer_use={classification.get('is_computer_use')}, memory={classification.get('requires_memory_retrieval')}")
+
+            # 2. Check for Computer Use GUI Automation
+            if classification.get("is_computer_use", False) or self._is_computer_control_task(prompt):
                 if self.openai_client is not None:
-                    self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated)
+                    summary = self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated)
+                    self.conversation_history.append({"role": "user", "content": prompt})
+                    self.conversation_history.append({"role": "assistant", "content": summary or "Completed desktop task."})
+                    if len(self.conversation_history) > self.max_history_turns * 2:
+                        self.conversation_history = self.conversation_history[-self.max_history_turns * 2:]
                     return
                 else:
-                    # Offline fallback guardrail
                     fallback_msg = "Computer automation requires an active cloud connection and is unavailable offline."
                     print(f"[AI] {fallback_msg}")
                     if on_reply_generated:
@@ -411,33 +531,54 @@ class AIAssistant:
                     self._speak(fallback_msg)
                     return
 
+            # 3. Selective Screen Capture: Only capture screenshot if needed and not already supplied
+            effective_image = image_bytes
+            if effective_image is None and classification.get("requires_screen_context", False):
+                try:
+                    b64_snap, _, _ = self.controller.capture_screen_base64()
+                    effective_image = base64.b64decode(b64_snap)
+                    print(f"[AI] Selective Screen Capture: Acquired live full-screen context for '{prompt}'")
+                except Exception as e:
+                    print(f"[AI WARN] Selective screen capture error: {e}")
+
             if on_status_change:
                 on_status_change("THINKING")
 
             reply: Optional[str] = None
+            target_model = classification.get("target_model", self.primary_model)
+            if effective_image is not None:
+                target_model = self.computer_use_model
 
-            # 1. Attempt Primary OpenAI API Dispatch
+            # 4. Attempt Primary OpenAI API Dispatch
             if self.openai_client is not None:
                 try:
                     reply = self._query_openai(
                         prompt,
-                        image_bytes,
+                        effective_image,
                         on_annotations_generated,
                         on_status_change=on_status_change,
                         on_reply_generated=on_reply_generated,
+                        target_model=target_model,
+                        classification=classification,
                     )
                 except Exception as e:
                     print(f"[AI] OpenAI unavailable ({e}), falling back to local Qwen 3B...")
                     reply = None
 
-            # 2. Fallback to Local Ollama Engine (Strict Qwen 3B)
+            # 5. Fallback to Local Ollama Engine (Strict Qwen 3B)
             if reply is None:
-                reply = self._query_ollama(prompt, image_bytes)
+                reply = self._query_ollama(prompt, effective_image, classification=classification)
 
             if not reply or not reply.strip():
                 reply = "I didn't receive a response."
 
             clean_reply = reply.strip()
+
+            # Record in rolling in-session conversation history
+            self.conversation_history.append({"role": "user", "content": prompt})
+            self.conversation_history.append({"role": "assistant", "content": clean_reply})
+            if len(self.conversation_history) > self.max_history_turns * 2:
+                self.conversation_history = self.conversation_history[-self.max_history_turns * 2:]
 
             if on_reply_generated:
                 try:
@@ -472,7 +613,6 @@ class AIAssistant:
             if on_status_change:
                 on_status_change("SPEAKING")
             self._speak(error_msg)
-
         finally:
             with self.busy_lock:
                 self.is_busy = False
@@ -751,14 +891,33 @@ class AIAssistant:
         on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
         on_status_change: Optional[Callable[[str], None]] = None,
         on_reply_generated: Optional[Callable[[str], None]] = None,
+        target_model: Optional[str] = None,
+        classification: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Dispatches query to OpenAI gpt-4o-mini / gpt-5.4 with support for function tools and multimodal vision."""
+        """Dispatches query to OpenAI gpt-4o-mini / gpt-5.4 with selective RAG memory and multimodal vision."""
         if not self.openai_client:
             raise RuntimeError("OpenAI client not initialized")
 
+        # Selective BM25/keyword memory retrieval
+        req_mem = classification.get("requires_memory_retrieval", True) if classification else True
+        search_q = classification.get("memory_search_query", "") if classification else ""
+        if not search_q:
+            search_q = prompt
+
+        vault_context = self.memory_vault.retrieve_relevant_memories(search_q, top_k=3) if req_mem else ""
+
+        if vault_context:
+            system_content = f"{self.system_instruction}\n\n---\nRELEVANT LONG-TERM MEMORIES:\n{vault_context}\n---"
+        else:
+            system_content = self.system_instruction
+
         messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.system_instruction}
+            {"role": "system", "content": system_content}
         ]
+
+        # Append recent rolling in-session conversation history
+        for turn in self.conversation_history:
+            messages.append({"role": turn["role"], "content": str(turn["content"])})
 
         if image_bytes:
             img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -775,12 +934,12 @@ class AIAssistant:
         else:
             messages.append({"role": "user", "content": prompt})
 
-        target_model = self.computer_use_model if image_bytes else self.primary_model
-        print(f"[AI] Dispatching query to {target_model} (multimodal={image_bytes is not None})...")
+        chosen_model = target_model or (self.computer_use_model if image_bytes else self.primary_model)
+        print(f"[AI] Dispatching query to {chosen_model} (multimodal={image_bytes is not None}, memories={bool(vault_context)})...")
 
         try:
             response = self.openai_client.chat.completions.create(
-                model=target_model,
+                model=chosen_model,
                 messages=messages,
                 tools=COMPUTER_USE_TOOLS,
                 tool_choice="auto",
@@ -790,7 +949,7 @@ class AIAssistant:
         except Exception as err:
             if "temperature" in str(err).lower() or "unsupported_parameter" in str(err).lower():
                 response = self.openai_client.chat.completions.create(
-                    model=target_model,
+                    model=chosen_model,
                     messages=messages,
                     tools=COMPUTER_USE_TOOLS,
                     tool_choice="auto",
@@ -833,7 +992,7 @@ class AIAssistant:
                         if on_annotations_generated:
                             on_annotations_generated(anns)
                         elif self.on_annotations_generated:
-                            self.on_annotations_generated(anns)
+                            on_annotations_generated(anns)
                     result_text = f"Annotations displayed on screen: {spoken_summary}"
                 else:
                     tool_func = self.available_tools.get(func_name)
@@ -857,7 +1016,7 @@ class AIAssistant:
             # Follow-up completion for natural spoken confirmation
             try:
                 follow_up = self.openai_client.chat.completions.create(
-                    model=target_model,
+                    model=chosen_model,
                     messages=messages,
                     max_completion_tokens=100,
                     temperature=0.2,
@@ -868,11 +1027,36 @@ class AIAssistant:
         else:
             return msg.content or ""
 
-    def _query_ollama(self, prompt: str, image_bytes: Optional[bytes]) -> str:
+    def _query_ollama(
+        self,
+        prompt: str,
+        image_bytes: Optional[bytes],
+        classification: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Dispatches query strictly to local Ollama qwen2.5vl:3b as offline fallback."""
         # Fallback guardrail: check if computer automation was requested
         if self._is_computer_control_task(prompt):
             return "Computer automation requires an active cloud connection and is unavailable offline."
+
+        req_mem = classification.get("requires_memory_retrieval", True) if classification else True
+        search_q = classification.get("memory_search_query", "") if classification else ""
+        if not search_q:
+            search_q = prompt
+
+        vault_context = self.memory_vault.retrieve_relevant_memories(search_q, top_k=3) if req_mem else ""
+
+        if vault_context:
+            system_content = f"{self.system_instruction}\n\n---\nRELEVANT LONG-TERM MEMORIES:\n{vault_context}\n---"
+        else:
+            system_content = self.system_instruction
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": system_content}
+        ]
+
+        # Append recent rolling in-session conversation history
+        for turn in self.conversation_history:
+            messages.append({"role": turn["role"], "content": str(turn["content"])})
 
         if image_bytes:
             img_b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -887,10 +1071,7 @@ class AIAssistant:
                 "content": prompt,
             }
 
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": self.system_instruction},
-            user_message,
-        ]
+        messages.append(user_message)
 
         try:
             response = self.ollama_client.chat(

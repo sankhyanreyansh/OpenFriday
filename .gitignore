@@ -12,3 +12,4 @@ models/
 .env.*
 PROJECT_CONTEXT_SUMMARY.md
 scratch/
+memory_vault/
