@@ -251,6 +251,39 @@ class MouseController:
         """Triggers Mission Control directly via macOS launch services."""
         subprocess.Popen(["open", "-a", "Mission Control"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    # macOS Virtual Keycodes for Zoom
+    # 0x18 = Key '+' / '='
+    # 0x1B = Key '-' / '_'
+    KEY_PLUS = 0x18
+    KEY_MINUS = 0x1B
+
+    def zoom(self, direction: str, steps: int = 1):
+        """
+        Simulates macOS Command + Plus (Zoom In) or Command + Minus (Zoom Out).
+        direction: 'in' or 'out'
+        steps: number of zoom keystrokes to fire
+        """
+        keycode = self.KEY_PLUS if direction.lower() == "in" else self.KEY_MINUS
+
+        if self.quartz_available:
+            for _ in range(steps):
+                down_event = CG.CGEventCreateKeyboardEvent(None, keycode, True)
+                if down_event:
+                    CG.CGEventSetFlags(down_event, CG.kCGEventFlagMaskCommand)
+                    CG.CGEventPost(CG.kCGHIDEventTap, down_event)
+
+                up_event = CG.CGEventCreateKeyboardEvent(None, keycode, False)
+                if up_event:
+                    CG.CGEventSetFlags(up_event, CG.kCGEventFlagMaskCommand)
+                    CG.CGEventPost(CG.kCGHIDEventTap, up_event)
+
+                time.sleep(0.03)
+        else:
+            key_char = '=' if direction.lower() == "in" else '-'
+            for _ in range(steps):
+                pyautogui.hotkey('command', key_char, _pause=False)
+                time.sleep(0.03)
+
     def trigger_shortcut(self, action: str):
         """Dispatches keyboard shortcuts reliably on macOS."""
         scripts = {

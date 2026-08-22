@@ -153,46 +153,48 @@ COMPUTER_USE_TOOLS = [
         "type": "function",
         "function": {
             "name": "annotate_screen",
-            "description": "Visually annotate, highlight, label, or point to specific elements, text, buttons, diagram parts, or regions on the user's screen with high-precision bounding boxes.",
+            "strict": True,
+            "description": "Draw colored visual bounding boxes and auto-positioned explanation cards across the user's screen. Use when the user asks to explain diagrams, circuits, code, or locate UI elements.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "spoken_response": {
                         "type": "string",
-                        "description": "Natural 1-2 sentence spoken summary explaining the highlighted items to the user."
+                        "description": "Brief 1-2 sentence spoken explanation for TTS audio.",
                     },
                     "annotations": {
                         "type": "array",
-                        "description": "List of visual bounding box annotations to draw over the screen.",
+                        "description": "List of 1 to 5 distinct visual bounding boxes with explanations. Must contain at least 1 annotation.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "box_2d": {
                                     "type": "array",
                                     "items": {"type": "integer"},
-                                    "description": "Bounding box coordinates in [ymin, xmin, ymax, xmax] on a normalized 0 to 1000 scale.",
+                                    "description": "[ymin, xmin, ymax, xmax] on a 0-1000 normalized grid tightly enclosing the target visual component.",
                                 },
                                 "label": {
                                     "type": "string",
-                                    "description": "Short title label for the annotated element (e.g. 'Submit Button', 'Main Power Supply', 'Syntax Error').",
+                                    "description": "Short heading (e.g. 'Inputs', 'Logic Gate', 'Attention Layer').",
                                 },
-                                "description": {
+                                "text": {
                                     "type": "string",
-                                    "description": "Brief 1-sentence explanation of what this element is or does.",
+                                    "description": "1 clear sentence explaining this specific component.",
                                 },
                                 "color": {
                                     "type": "string",
-                                    "enum": ["cyan", "amber", "emerald", "rose", "violet"],
-                                    "description": "Accent color for the card and box outline.",
-                                }
+                                    "description": "Hex color code (e.g., '#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#a855f7').",
+                                },
                             },
-                            "required": ["box_2d", "label"]
-                        }
-                    }
+                            "required": ["box_2d", "label", "text", "color"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["spoken_response", "annotations"]
-            }
-        }
+                "required": ["spoken_response", "annotations"],
+                "additionalProperties": False,
+            },
+        },
     },
     {
         "type": "function",
@@ -258,13 +260,17 @@ OPENAI_TOOLS = COMPUTER_USE_TOOLS
 
 
 class AIAssistant:
-    """Dual-tier AI assistant client integrating OpenAI API with local Ollama fallback and Computer Use automation."""
+    """
+    Dual-Tier AI Desktop Assistant for FRIDAY:
+    1. Primary Tier: OpenAI API (gpt-4o-mini for general chat/router, gpt-5.4 for vision/computer use).
+    2. Fallback Tier: Local Ollama (strictly qwen2.5vl:3b) when offline or API is unavailable.
+    """
 
     def __init__(
         self,
         primary_model: str = "gpt-4o-mini",
         computer_use_model: str = "gpt-5.4",
-        fallback_host: str = "http://127.0.0.1:11434",
+        fallback_host: str = "http://localhost:11434",
     ):
         self.primary_model = primary_model
         self.computer_use_model = computer_use_model
@@ -308,6 +314,16 @@ class AIAssistant:
             "- Vertical grid lines mark X coordinates: 100, 200, 300, ..., 900.\n"
             "- Horizontal grid lines mark Y coordinates: 100, 200, 300, ..., 900.\n"
             "- Inspect these labeled grid lines to accurately locate targets and emit precise [ymin, xmin, ymax, xmax] bounding boxes or click coordinates.\n\n"
+            "VISUAL ANNOTATION GUIDELINES:\n"
+            "1. BOUNDING BOX ACCURACY:\n"
+            "   - Use the reference coordinate grid lines (0 to 1000) on the screenshot to pinpoint the exact boundaries of components.\n"
+            "   - `box_2d` must be [ymin, xmin, ymax, xmax] tightly enclosing the specific visual element without capturing excess background.\n"
+            "   - Avoid creating overlapping or nested bounding boxes unless one component is strictly a sub-element of another.\n"
+            "   - Emit between 1 and 5 focused, distinct annotations. Even a single well-placed annotation is sufficient if there is only one relevant element on screen.\n"
+            "2. CARD LABELS & TEXT:\n"
+            "   - Keep `label` short (1-3 words).\n"
+            "   - Keep `text` concise and direct (1 clear sentence).\n"
+            "   - Use distinct contrasting colors for different functional groups (e.g. green '#22c55e' for inputs, blue '#3b82f6' for logic/processing, red '#ef4444' for outputs/critical blocks).\n\n"
             "DECISION GUIDELINES:\n"
             "1. DESKTOP INTERACTION VS. DIRECT ANSWER:\n"
             "   - If the user asks for code, writing, editing, typing, clicking, or actions relative to something on their screen (e.g., 'write this code below the hello world statement in my editor', 'clear the text in this compiler', 'click on cell B3', 'reply to this message', 'open app and do X'):\n"

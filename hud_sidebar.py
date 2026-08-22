@@ -244,6 +244,9 @@ class GlassmorphicStatusPill(QWidget):
                 display_text = f"● {data.radial_sector}"
             else:
                 display_text = "● RADIAL MENU"
+        elif data.state == GestureState.ZOOM:
+            color = "#E4E4E7"
+            display_text = f"● {data.status_message}" if data.status_message else "● ZOOM"
         elif data.state == GestureState.SWIPE_NAV:
             color = "#E4E4E7"
             if data.nav_action == "MISSION_CONTROL":
@@ -259,7 +262,7 @@ class GlassmorphicStatusPill(QWidget):
 
         self.pill_status_lbl.setText(display_text)
 
-        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING, GestureState.AI_LISTENING, GestureState.RADIAL_MENU):
+        if data.state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.LISTENING, GestureState.AI_LISTENING, GestureState.RADIAL_MENU, GestureState.ZOOM):
             color = "#E4E4E7"
         elif data.state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.TRANSCRIBING):
             color = "#D4D4D8"

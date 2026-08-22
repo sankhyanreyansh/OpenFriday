@@ -159,6 +159,7 @@ class VisionEngine(QThread):
         # Previous state memory & Centroid Persistence
         self.prev_state = GestureState.NONE
         self.was_dragging = False
+        self.last_zoom_time: float = 0.0
         self.prev_dominant_centroid: Optional[Tuple[float, float]] = None
         self.prev_modifier_centroid: Optional[Tuple[float, float]] = None
         self.frame_counter = 0
@@ -502,18 +503,56 @@ class VisionEngine(QThread):
 
                         # Apply One-Euro dynamic smoothing strictly to cursor coordinates
                         cursor_x, cursor_y = self.cursor_smoother.smooth(unfiltered_sx, unfiltered_sy)
-
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
-                            smoothed_landmarks,
-                            (cursor_x, cursor_y),
-                            left_landmarks=left_hand_landmarks,
-                            now=now,
-                        )
-
                         screen_x, screen_y = cursor_x, cursor_y
 
-                        if self.mouse_control_enabled:
-                            self._handle_mouse_events(gesture_state, screen_x, screen_y, scroll_dy, nav_action)
+                        # Check for Dual-Hand Pinch Spatial Zoom
+                        zoom_delta = 0.0
+                        if left_hand_landmarks is not None:
+                            left_is_pinched = self.gesture_recognizer.is_hand_pinched(left_hand_landmarks)
+                            right_is_pinched = self.gesture_recognizer.is_hand_pinched(smoothed_landmarks)
+                            zoom_delta = self.gesture_recognizer.process_dual_hand_zoom(
+                                left_hand_landmarks,
+                                smoothed_landmarks,
+                                left_is_pinched,
+                                right_is_pinched,
+                            )
+
+                        if self.gesture_recognizer.dual_pinch_active:
+                            gesture_state = GestureState.ZOOM
+                            pinch_progress = 1.0
+                            scroll_dy = 0
+                            nav_action = None
+                            radial_sector = None
+                            snip_box = None
+                            effective_pos = (cursor_x, cursor_y)
+
+                            if self.was_dragging:
+                                self.mouse_controller.mouse_up()
+                                self.was_dragging = False
+
+                            if zoom_delta != 0.0 and self.mouse_control_enabled:
+                                if now - self.last_zoom_time >= 0.06:
+                                    if zoom_delta > 0:
+                                        self.mouse_controller.zoom("in", steps=1)
+                                        status_msg = "ZOOM IN"
+                                    else:
+                                        self.mouse_controller.zoom("out", steps=1)
+                                        status_msg = "ZOOM OUT"
+                                    self.last_zoom_time = now
+                                else:
+                                    status_msg = "ZOOM IN" if zoom_delta > 0 else "ZOOM OUT"
+                            else:
+                                status_msg = "ZOOM"
+                        else:
+                            gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
+                                smoothed_landmarks,
+                                (cursor_x, cursor_y),
+                                left_landmarks=left_hand_landmarks,
+                                now=now,
+                            )
+
+                            if self.mouse_control_enabled:
+                                self._handle_mouse_events(gesture_state, cursor_x, cursor_y, scroll_dy, nav_action)
 
                         gesture_data = GestureData(
                             raw_x=raw_x,

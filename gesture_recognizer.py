@@ -29,6 +29,7 @@ class GestureState(Enum):
     AI_LISTENING = "AI LISTENING"
     SNIP_DRAG = "SNIP DRAG"
     SNIP_RELEASE = "SNIP RELEASE"
+    ZOOM = "ZOOM"
 
 
 class GestureData:
@@ -164,6 +165,11 @@ class GestureRecognizer:
         self.DUAL_OPEN_HOLD_THRESHOLD: float = 0.25  # 250ms continuous hold required
         self.screen_center: Tuple[float, float] = (1470.0 / 2.0, 956.0 / 2.0)
 
+        # Dual-Hand Pinch Spatial Zoom Tracking
+        self.dual_pinch_active: bool = False
+        self.prev_dual_pinch_dist: Optional[float] = None
+        self.zoom_deadzone: float = 0.015  # Minimum distance delta threshold to prevent jitter
+
     def set_screen_dimensions(self, width: float, height: float):
         """Sets the screen center coordinates for radial wheel calculations."""
         self.screen_center = (width / 2.0, height / 2.0)
@@ -172,6 +178,81 @@ class GestureRecognizer:
         """Manually dismisses the radial menu modal state."""
         self.is_radial_active = False
         self.dual_open_start_time = None
+
+    def is_hand_pinched(self, landmarks) -> bool:
+        """Evaluates if a hand configuration is in an active pinch contact."""
+        if landmarks is None or len(landmarks) < 21:
+            return False
+        palm_scale = self._get_palm_scale(landmarks)
+        thumb_tip = landmarks[self.THUMB_TIP]
+        index_tip = landmarks[self.INDEX_TIP]
+        index_dip = landmarks[self.INDEX_DIP]
+
+        if hasattr(thumb_tip, 'x'):
+            d_tip = self._euclidean_dist(index_tip, thumb_tip) / palm_scale
+            d_dip = self._euclidean_dist(index_dip, thumb_tip) / palm_scale
+        else:
+            dx = index_tip[0] - thumb_tip[0]
+            dy = index_tip[1] - thumb_tip[1]
+            dz = (index_tip[2] - thumb_tip[2]) if len(index_tip) > 2 and len(thumb_tip) > 2 else 0.0
+            d_tip = math.sqrt(dx * dx + dy * dy + dz * dz) / palm_scale
+
+            dx2 = index_dip[0] - thumb_tip[0]
+            dy2 = index_dip[1] - thumb_tip[1]
+            dz2 = (index_dip[2] - thumb_tip[2]) if len(index_dip) > 2 and len(thumb_tip) > 2 else 0.0
+            d_dip = math.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2) / palm_scale
+
+        index_thumb_min_dist = min(d_tip, d_dip)
+        return index_thumb_min_dist < self.pinch_start_threshold
+
+    def process_dual_hand_zoom(
+        self,
+        left_landmarks,
+        right_landmarks,
+        left_pinched: bool,
+        right_pinched: bool
+    ) -> float:
+        """
+        Returns a zoom delta float:
+        - Positive (> 0): Hands moving apart -> Zoom In
+        - Negative (< 0): Hands moving closer -> Zoom Out
+        - 0.0: No zoom action or below deadzone
+        """
+        if not (left_pinched and right_pinched and left_landmarks and right_landmarks):
+            self.dual_pinch_active = False
+            self.prev_dual_pinch_dist = None
+            return 0.0
+
+        def get_xy(lm):
+            if hasattr(lm, 'x'):
+                return lm.x, lm.y
+            return lm[0], lm[1]
+
+        l_thumb_x, l_thumb_y = get_xy(left_landmarks[self.THUMB_TIP])
+        l_index_x, l_index_y = get_xy(left_landmarks[self.INDEX_TIP])
+        lx = (l_thumb_x + l_index_x) / 2.0
+        ly = (l_thumb_y + l_index_y) / 2.0
+
+        r_thumb_x, r_thumb_y = get_xy(right_landmarks[self.THUMB_TIP])
+        r_index_x, r_index_y = get_xy(right_landmarks[self.INDEX_TIP])
+        rx = (r_thumb_x + r_index_x) / 2.0
+        ry = (r_thumb_y + r_index_y) / 2.0
+
+        current_dist = math.hypot(rx - lx, ry - ly)
+
+        if not self.dual_pinch_active or self.prev_dual_pinch_dist is None:
+            self.dual_pinch_active = True
+            self.prev_dual_pinch_dist = current_dist
+            return 0.0
+
+        dist_delta = current_dist - self.prev_dual_pinch_dist
+
+        # Apply deadzone filter to prevent involuntary jitter
+        if abs(dist_delta) < self.zoom_deadzone:
+            return 0.0
+
+        self.prev_dual_pinch_dist = current_dist
+        return dist_delta
 
     def _euclidean_dist(self, p1, p2) -> float:
         dx = p1.x - p2.x

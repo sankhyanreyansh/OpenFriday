@@ -146,60 +146,65 @@ class AnnotationOverlay(QWidget):
 
             ymin, xmin, ymax, xmax = box[0], box[1], box[2], box[3]
 
-            # Map normalized grid to actual display pixels
+            # 1. Map normalized grid (0-1000) to display pixels
             rx = int((xmin / 1000.0) * sw)
             ry = int((ymin / 1000.0) * sh)
-            rw = max(4, int(((xmax - xmin) / 1000.0) * sw))
-            rh = max(4, int(((ymax - ymin) / 1000.0) * sh))
+            rw = max(20, int(((xmax - xmin) / 1000.0) * sw))
+            rh = max(20, int(((ymax - ymin) / 1000.0) * sh))
 
-            color_hex = item.get("color", "#38bdf8")
+            color_hex = item.get("color", "#3b82f6")
             base_color = QColor(color_hex)
             if not base_color.isValid():
-                base_color = QColor("#38bdf8")
+                base_color = QColor("#3b82f6")
 
-            # 1. Draw Glowing Bounding Box (Uses custom annotation color)
+            # 2. Draw Glowing Target Bounding Box
             glow_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 45)
-            glow_pen = QPen(glow_color, 6.0)
-            painter.setPen(glow_pen)
+            painter.setPen(QPen(glow_color, 6.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRoundedRect(rx - 2, ry - 2, rw + 4, rh + 4, 8, 8)
 
-            pen = QPen(base_color, 2.0)
-            painter.setPen(pen)
-            fill_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 20)
-            painter.setBrush(QBrush(fill_color))
+            painter.setPen(QPen(base_color, 2.0))
+            painter.setBrush(QBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 25)))
             painter.drawRoundedRect(rx, ry, rw, rh, 8, 8)
 
-            # 2. Draw Floating Glass Callout Card (Neutral dark glass matching HUDContextCard - NO colored borders/bars)
-            label_title = item.get("label", "")
-            desc_text = item.get("text", "")
-            if not label_title and not desc_text:
-                continue
+            # 3. Dynamic Card Geometry Calculation (Placed directly above box, flipped below if near top)
+            card_w = 240
+            card_h = 68
 
-            # Position card directly above or below the bounding box
-            card_w = 230
-            card_h = 66
-            card_x = max(10, min(rx + (rw // 2) - (card_w // 2), sw - card_w - 10))
-            card_y = ry - 75 if ry > 90 else ry + rh + 10
+            # Horizontally center card relative to bounding box
+            card_x = rx + (rw // 2) - (card_w // 2)
+            # Clamp horizontally within screen padding
+            card_x = max(12, min(card_x, sw - card_w - 12))
 
-            # Pure neutral dark glass matching HUDContextCard
+            # Place above box; flip below if too close to top edge
+            if ry > card_h + 16:
+                card_y = ry - card_h - 8
+            else:
+                card_y = ry + rh + 8
+
+            # 4. Render Dark Glass Card (Matching HUDContextCard style)
             painter.setPen(QPen(QColor(255, 255, 255, 30), 1.0))
-            painter.setBrush(QBrush(QColor(18, 20, 26, 225)))
-            painter.drawRoundedRect(card_x, card_y, card_w, card_h, 12, 12)
+            painter.setBrush(QBrush(QColor(18, 20, 26, 230)))
+            painter.drawRoundedRect(card_x, card_y, card_w, card_h, 10, 10)
 
-            # Title Label
-            if label_title:
-                painter.setPen(QColor(255, 255, 255, 240))
-                title_font = QFont("-apple-system", 11, QFont.Weight.Bold)
-                painter.setFont(title_font)
-                painter.drawText(card_x + 12, card_y + 18, label_title)
+            # Accent color pill indicator on card
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(base_color))
+            painter.drawRoundedRect(card_x + 10, card_y + 11, 4, 14, 2, 2)
 
-            # Description Text
+            # Title Text
+            label_text = item.get("label", "")
+            if label_text:
+                painter.setPen(QColor(255, 255, 255, 245))
+                painter.setFont(QFont("-apple-system", 11, QFont.Weight.Bold))
+                painter.drawText(card_x + 20, card_y + 22, label_text)
+
+            # Description Subtext
+            desc_text = item.get("text", "")
             if desc_text:
                 painter.setPen(QColor(161, 161, 170, 230))
-                body_font = QFont("-apple-system", 10, QFont.Weight.Normal)
-                painter.setFont(body_font)
-                text_rect = QRectF(card_x + 12, card_y + 24, card_w - 24, 38)
+                painter.setFont(QFont("-apple-system", 10, QFont.Weight.Normal))
+                text_rect = QRectF(card_x + 10, card_y + 28, card_w - 20, 36)
                 painter.drawText(text_rect, int(Qt.TextFlag.TextWordWrap), desc_text)
 
 
