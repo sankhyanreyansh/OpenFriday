@@ -1,101 +1,172 @@
-# 🤖 FRIDAY
+# FRIDAY: Intelligent Gesture Controller and Desktop Assistant for macOS
 
-**High-Precision Hand & Finger Gesture Desktop Controller for macOS with Dual-Hand Modifier Architecture, Strict Precedence Gating, and Centroid Persistence.**
+FRIDAY is a hands-free desktop assistant for macOS that combines touchless webcam gesture navigation, voice dictation, conversational intelligence, and autonomous computer control.
 
-Control your entire Mac using natural hand and finger gestures from your webcam. Features an intuitive Dual-Hand "Modifier" architecture (where your Left Hand acts as an on-demand physical "Shift Key"), rock-solid velocity-adaptive EMA motion smoothing with a 6px stationary deadzone, spatial hysteresis centroid tracking to eliminate hand swapping when hands are close, strict extension precedence gating so scrolling never conflicts with right-clicks, strict 35px movement gate for Drag & Drop, and native macOS Quartz event dispatch.
-
----
-
-## ✨ Features
-
-- **Dual-Hand "Modifier" Gesture & Voice Dictation Architecture**:
-  - 🖐️ **Right Hand (Dominant)**: Controls sub-pixel cursor movement, primary clicks, two-finger scrolling, and 3-finger space switching.
-  - 🖐️ **Left Hand (Physical "Shift Key" Modifier & Voice Dictation Push-to-Talk)**:
-    - **Normal Mode (Left Hand Down)**:
-      - ☝️ **Point**: Cursor navigation via stable Index MCP Knuckle.
-      - 🤏 **Pinch Tap (<250ms)**: Instant **Left Click** at locked $(X,Y)$ target (Middle Finger Curled).
-      - ✊ **Pinch Hold (>450ms & >35px move)**: **Drag & Drop** mode.
-      - 🤏🤏 **Double Pinch Tap**: **Double Click**.
-    - **Modifier Mode (Left Hand Extended)**:
-      - 🖐️+✌️ **Two-Finger Scroll (Strict Precedence)**: Extending Index & Middle fingers forces **Scroll Mode Only** (completely bypassing any clicks). Moving hand UP scrolls UP; moving DOWN scrolls DOWN.
-      - 🖐️+🤏 **Pinch Tap (<250ms)**: Instant **Right Click** (Context Menu), requiring Middle Finger to be curled.
-    - **Push-to-Talk Voice Dictation Mode (Left Hand Fist)**:
-      - ✊ **Left Hand Fist**: Activates local speech-to-text powered by `faster-whisper` (int8 quantized). Releasing the fist automatically transcribes your speech and pastes text directly into your active search bar or text field via Cmd+V.
-
-- **Spatial Hysteresis & Centroid Tracking**:
-  - Multi-hand identity tracking matches hands frame-to-frame based on Euclidean distance to previous palm centroids.
-  - Hands touching, crossing, or moving close to each other in frame will **never swap identities** or drop tracking.
-
-- **GTA-Style Radial Shortcut Wheel**:
-  - 🖐️🖐️ **Dual Open Palms (Hold 300ms)**: Pops up a sleek, high-contrast monochrome glassmorphic radial shortcut wheel directly at the center of your screen.
-  - **4 Radial Quadrants & macOS System Shortcuts**:
-    - ⬆️ **TOP**: `ENTER` (Simulates Return key ↵)
-    - ➡️ **RIGHT**: `NEW TAB` (Simulates `⌘ + T`)
-    - ⬅️ **LEFT**: `CLOSE TAB` (Simulates `⌘ + W`)
-    - ⬇️ **BOTTOM**: `ESCAPE` (Simulates Escape key ⎋)
-  - **Interaction**: Move your right hand in the direction of the desired sector to highlight it, and **Pinch Tap** (<250ms) to trigger the shortcut with an instant shockwave ripple effect.
-
-- **Subdued Minimalist Glassmorphic HUD**:
-  - **Status Pill**: A compact, non-intrusive acrylic pill floating in the top-right corner (`rgba(24, 24, 27, 0.85)` with 1px soft border) showing live state (`POINTING`, `CLICK`, `DRAGGING`, `RIGHT-CLICK`, `SCROLLING`, `SPACES`, `RADIAL MENU`, `LISTENING...`), modifier presence (`● [SHIFT]`), and pause toggle.
+By tracking your hands through a standard webcam and listening for voice commands, FRIDAY allows you to navigate macOS, trigger shortcuts, dictate text, ask visual questions about your screen, and delegate multi-step desktop tasks to an intelligent assistant.
 
 ---
 
-## 🚀 Quick Start (Single Command)
+## Core Capabilities
+
+### 1. Touchless Hand Gesture Navigation
+- **Precise Cursor Control**: Move your pointer naturally across the screen using your right index finger.
+- **Clicking and Selection**: Perform quick pinch taps for left clicks, double pinch taps for double clicks, and held pinches for drag-and-drop operations.
+- **Natural Scrolling**: Extend two fingers with your left hand raised to scroll up or down smoothly with momentum.
+- **Workspace Navigation**: Swipe three fingers horizontally to switch between macOS Spaces, or swipe upward to open Mission Control.
+- **Quick Shortcut Wheel**: Flash both palms open to bring up a radial menu with instant shortcuts for Enter, New Tab, Close Tab, and Escape.
+- **Screen Snipping**: Raise your left hand and drag a box with your right pinch to snip any area of the screen for instant AI analysis.
+
+### 2. Voice Assistant and Autonomous Desktop Automation
+- **Spoken Voice Interactions**: Say "Friday, ..." followed by your question or command for hands-free voice assistance.
+- **Push-to-Talk Dictation**: Hold your left hand in a fist while speaking to dictate text directly into any active search bar, text editor, or message field.
+- **Smart Query Routing**: Questions are automatically routed for maximum speed and efficiency. Simple questions and math are answered immediately without taking unnecessary screenshots, while visual questions capture your screen for analysis.
+- **Autonomous Desktop Automation**: Ask FRIDAY to complete multi-step tasks (such as opening applications, searching websites, or controlling tools) and watch the assistant navigate your interface autonomously.
+- **Visual Screen Annotations**: When you ask about diagrams, complex interfaces, or code on your display, FRIDAY highlights and labels relevant elements directly on your screen.
+- **Instant Safety Abort**: Flash both open palms at any time during automated computer control to instantly stop all actions and return control to you.
+
+### 3. Long-Term Memory Vault
+- **Persistent Personal Memory**: FRIDAY saves personal facts, preferences, and project notes to local text files inside the `memory_vault/` directory.
+- **Context-Aware Recall**: When you ask questions relating to your profile, projects, or saved notes, FRIDAY searches your memory vault and incorporates relevant facts into the conversation.
+
+---
+
+## Gesture Reference
+
+| Action | Hand Configuration | Description |
+| :--- | :--- | :--- |
+| **Move Pointer** | Right index finger extended | Move the mouse pointer across the screen. |
+| **Left Click** | Right pinch tap (thumb and index finger) | Performs an immediate left click. |
+| **Double Click** | Double right pinch tap within 0.4s | Performs a double click. |
+| **Drag and Drop** | Right pinch hold and move | Holds down the left mouse button and drags items across the screen. |
+| **Right Click** | Left hand open + Right pinch tap | Opens the context menu or performs a right click. |
+| **Scroll Up / Down** | Left hand open + Right index and middle fingers extended | Move hand upward to scroll up; move downward to scroll down. |
+| **Next / Previous Space** | Right three fingers extended (swipe left/right) | Switches to the adjacent macOS desktop space. |
+| **Mission Control** | Right three fingers extended (swipe up) | Opens or closes macOS Mission Control. |
+| **Voice Dictation** | Left hand fist (hold while speaking) | Records your voice and types transcribed text into the active field upon release. |
+| **Radial Shortcut Menu** | Both hands open palms for 0.3s | Displays on-screen wheel for Enter, New Tab, Close Tab, and Escape. |
+| **Safety Abort** | Both hands open palms during automation | Instantly stops autonomous computer actions. |
+
+---
+
+## Local Setup Guide for macOS
+
+### Prerequisites
+- A Mac computer running macOS Monterey (12.0) or newer (Apple Silicon M1/M2/M3/M4 or Intel).
+- A built-in or external USB webcam.
+- Python 3.10 or Python 3.11 installed.
+
+---
+
+### Step 1: Clone the Repository
+Open Terminal and navigate to the project directory:
+
+```bash
+cd /path/to/FRIDAY
+```
+
+---
+
+### Step 2: Configure Environment Variables
+Create a `.env` file in the root directory and add your OpenAI API key:
+
+```bash
+OPENAI_API_KEY=your_openai_api_key_here
+```
+
+*Note: An OpenAI API key is required for cloud-based conversational intelligence, visual screen reasoning, and autonomous computer control.*
+
+---
+
+### Step 3: Grant Required macOS Permissions
+For FRIDAY to see your gestures and move the mouse pointer, macOS requires two permissions:
+
+1. **Camera Permission**:
+   - Open **System Settings** -> **Privacy & Security** -> **Camera**.
+   - Ensure that your **Terminal** app (or Python executable) is enabled.
+
+2. **Accessibility Permission**:
+   - Open **System Settings** -> **Privacy & Security** -> **Accessibility**.
+   - Enable your **Terminal** app (or Python executable) to allow simulated mouse clicks and keyboard shortcuts.
+
+---
+
+### Step 4: Launch FRIDAY
+
+Run the automated launcher script in your terminal:
 
 ```bash
 ./run.sh
 ```
 
----
-
-## 🖐️ Gesture Cheatsheet
-
-| Gesture | Hand Configuration | Action |
-| :--- | :--- | :--- |
-| **Move Pointer** | ☝️ Right Index Finger extended | Smooth knuckle-anchored navigation (Index MCP 5) |
-| **Left Click** | 🤏 Right Pinch Tap (<250ms, Middle Curled) + Left Down | Clicks at locked $(X,Y)$ target |
-| **Drag & Drop** | ✊ Right Pinch Hold >450ms & move >35px (Left Down) | Holds mouse down and drags |
-| **Double Click** | 🤏🤏 Double Right Pinch Tap within 400ms | Native macOS double click |
-| **Right Click** | 🖐️+🤏 Right Pinch Tap (<250ms, Middle Curled) + **Left Extended** | Context menu / right click |
-| **Scroll Up** | 🖐️+✌️ 2 Fingers extended + **Left Extended** (Move UP) | Proportional upward scroll wheel |
-| **Scroll Down** | 🖐️+✌️ 2 Fingers extended + **Left Extended** (Move DOWN) | Proportional downward scroll wheel |
-| **Space Right** | 🖐️ 3 Fingers extended (Index, Middle, Ring) → Swipe Left | Switch to Desktop Space on Right (`Ctrl+Right`) |
-| **Space Left** | 🖐️ 3 Fingers extended (Index, Middle, Ring) → Swipe Right | Switch to Desktop Space on Left (`Ctrl+Left`) |
-| **Mission Control** | 🖐️ 3 Fingers extended (Index, Middle, Ring) → Swipe Up | Open/Close Mission Control (`Ctrl+Up`) |
-| **Voice Dictation** | ✊ **Left Hand Fist** (Hold while speaking, release to type) | Push-to-Talk speech-to-text via `faster-whisper` |
-| **Radial Shortcuts** | 🖐️🖐️ **Dual Open Palms** (Hold 300ms) → Point & Pinch Tap | GTA-style wheel: **Enter**, **New Tab**, **Close Tab**, **Escape** |
-
-
+The launcher script will automatically:
+1. Create a local Python virtual environment (`.venv`) if one does not already exist.
+2. Install all required dependencies from `requirements.txt`.
+3. Check and request any missing system permissions.
+4. Start the FRIDAY background vision engine, gesture recognizer, and interface HUD.
 
 ---
 
-## 🔒 macOS Permissions Setup
+## Manual Setup (Alternative)
 
-1. **Accessibility Permission** *(Required for controlling system cursor & clicks)*:
-   - Go to **System Settings** → **Privacy & Security** → **Accessibility**.
-   - Enable your terminal or Python executable.
-   - *Click "Accessibility" directly inside the FRIDAY HUD drawer to open settings.*
+If you prefer to install and run the project manually without `run.sh`:
 
-2. **Camera Permission** *(Required for webcam stream)*:
-   - Go to **System Settings** → **Privacy & Security** → **Camera**.
-   - Ensure Camera access is granted to your terminal / Python app.
+1. **Create and activate a virtual environment**:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. **Install required dependencies**:
+   ```bash
+   pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
+
+3. **Start the application**:
+   ```bash
+   python main.py
+   ```
 
 ---
 
-## 📁 Project Architecture
+## Configuration and Customization
 
+You can customize runtime settings by editing `config.json` in the root folder:
+
+```json
+{
+  "camera_index": 0,
+  "tracking_enabled": true,
+  "cursor_speed": 1.0,
+  "smoothing_factor": 0.5
+}
 ```
-FRIDAY/
-├── main.py                # Master application orchestrator & startup diagnostics
-├── hud_sidebar.py         # Subdued glassmorphic status pill & settings drawer
-├── overlay_window.py      # Transparent click-through monochrome visual reticle
-├── vision_engine.py       # Asynchronous CameraGrabber & Multi-Hand Centroid Tracker
-├── landmark_smoother.py   # Raw 3D landmark temporal pre-smoothing
-├── one_euro_filter.py     # Velocity-Adaptive EMA filter with 6px deadzone
-├── gesture_recognizer.py  # Knuckle anchor, strict precedence scroll, and modifier engine
-├── mouse_controller.py    # Native macOS Quartz CoreGraphics event injector
-├── permissions.py         # macOS Accessibility & Camera permission helper
-├── requirements.txt       # Python dependencies
-├── run.sh                 # Single-command launcher
-└── README.md              # User guide & documentation
-```
+
+- `camera_index`: Selects the webcam device index (default is `0` for the built-in FaceTime camera).
+- `tracking_enabled`: Enables or disables gesture tracking on startup.
+- `cursor_speed`: Adjusts the sensitivity of cursor motion.
+- `smoothing_factor`: Controls the balance between pointer responsiveness and jitter reduction.
+
+---
+
+## Local Memory Vault
+
+FRIDAY stores long-term memory in human-readable Markdown files inside the `memory_vault/` directory:
+- `user_profile.md`: Stores personal preferences, name, and profile details.
+- `projects.md`: Stores information about active projects and workflows.
+- `notes.md`: Stores general facts and saved reminders.
+
+You can inspect or edit these files in any text editor at any time.
+
+---
+
+## Troubleshooting
+
+- **Cursor does not move or clicks do not register**:
+  Make sure Accessibility permissions are granted to your Terminal app in **System Settings** -> **Privacy & Security** -> **Accessibility**. If the permission was previously enabled, toggle it off and back on.
+
+- **Webcam feed is blank or crashes on launch**:
+  Verify that Camera access is granted to Terminal in **System Settings** -> **Privacy & Security** -> **Camera**, and ensure no other application is exclusively locking the webcam.
+
+- **Gesture detection accuracy**:
+  Ensure your hand is clearly visible within the camera frame with adequate lighting. Avoid strong backlighting directly behind you for optimal hand landmark tracking.
