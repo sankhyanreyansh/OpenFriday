@@ -1,5 +1,5 @@
 {
-  "tracking_enabled": false,
+  "tracking_enabled": true,
   "mouse_control_enabled": true,
   "mirror_horizontal": true,
   "camera_id": 0,

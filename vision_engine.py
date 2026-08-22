@@ -190,12 +190,12 @@ class VisionEngine(QThread):
             margin = float(settings["margin_y"])
             self.roi_y_min = margin
             self.roi_y_max = 1.0 - margin
-        if "smoothing" in settings:
-            cutoff = float(settings["smoothing"])
+        if "smoothing" in settings or "min_cutoff" in settings:
+            cutoff = float(settings.get("smoothing", settings.get("min_cutoff", self.pointer_smoothing)))
             self.pointer_smoothing = cutoff
             self.cursor_smoother.update_params(cutoff, self.pointer_beta)
-        if "responsiveness" in settings:
-            beta = float(settings["responsiveness"])
+        if "responsiveness" in settings or "beta" in settings:
+            beta = float(settings.get("responsiveness", settings.get("beta", self.pointer_beta)))
             self.pointer_beta = beta
             self.cursor_smoother.update_params(self.pointer_smoothing, beta)
         if "pinch_threshold" in settings:
@@ -445,7 +445,9 @@ class VisionEngine(QThread):
                 )
 
                 if self.tracking_enabled:
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                    # Inference Downsampling: 640x360 cuts inference CPU compute in half
+                    infer_frame = cv2.resize(rgb_frame, (640, 360), interpolation=cv2.INTER_LINEAR)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=infer_frame)
                     result = landmarker.detect(mp_image)
 
                     right_hand_landmarks = None
@@ -455,6 +457,39 @@ class VisionEngine(QThread):
                         right_hand_landmarks, left_hand_landmarks = self._classify_hands(
                             result.hand_landmarks, getattr(result, "handedness", None)
                         )
+
+                    # GATING: When AI is actively controlling desktop, suppress normal mouse actions
+                    if self.ai_assistant.is_controlling_desktop:
+                        if self.was_dragging:
+                            self.mouse_controller.mouse_up()
+                            self.was_dragging = False
+
+                        # Abort Gesture: Dual Open Palms
+                        if right_hand_landmarks is not None and left_hand_landmarks is not None:
+                            is_r_open = self.gesture_recognizer._is_hand_fully_open(right_hand_landmarks)
+                            is_l_open = self.gesture_recognizer._is_hand_fully_open(left_hand_landmarks)
+                            if is_r_open and is_l_open:
+                                print("[VISION] Abort gesture (Dual Open Palms) detected during computer control!")
+                                self.ai_assistant.abort_computer_agent()
+                                gesture_data = GestureData(
+                                    is_tracking=True,
+                                    fps=fps_smoothing,
+                                    status_message="● Aborting Desktop Control...",
+                                    is_modifier_active=True,
+                                )
+                                self.gesture_updated.emit(gesture_data)
+                                self.fps_updated.emit(fps_smoothing)
+                                continue
+
+                        gesture_data = GestureData(
+                            is_tracking=(right_hand_landmarks is not None or left_hand_landmarks is not None),
+                            fps=fps_smoothing,
+                            status_message="● CONTROLLING DESKTOP (Flash palms to abort)",
+                            is_modifier_active=False,
+                        )
+                        self.gesture_updated.emit(gesture_data)
+                        self.fps_updated.emit(fps_smoothing)
+                        continue
 
                     if right_hand_landmarks is not None:
                         # Apply Landmark Pre-Smoothing on Right Hand only

@@ -188,8 +188,8 @@ class GlassmorphicStatusPill(QWidget):
         self.is_flashing_transcribe = False
 
     def update_ai_status(self, status: str):
-        """Updates status pill when AI is thinking, speaking, controlling desktop, or waiting for user help."""
-        if status in ("THINKING", "SPEAKING", "CONTROLLING", "CONTROLLING DESKTOP...", "WAITING", "WAITING FOR YOU..."):
+        """Updates status pill when AI is thinking, speaking, or controlling desktop."""
+        if status in ("THINKING", "SPEAKING", "CONTROLLING", "CONTROLLING DESKTOP..."):
             self.is_flashing_transcribe = False
             self.ai_status = status
             if status == "THINKING":
@@ -201,9 +201,6 @@ class GlassmorphicStatusPill(QWidget):
             elif status in ("CONTROLLING", "CONTROLLING DESKTOP..."):
                 self.pill_status_lbl.setText("● CONTROLLING DESKTOP...")
                 self.pill_status_lbl.setStyleSheet("color: #E4E4E7; font-weight: 500; font-size: 12px;")
-            elif status in ("WAITING", "WAITING FOR YOU..."):
-                self.pill_status_lbl.setText("● WAITING FOR YOU...")
-                self.pill_status_lbl.setStyleSheet("color: #F59E0B; font-weight: 500; font-size: 12px;")
         else:
             self.ai_status = None
 
@@ -226,10 +223,6 @@ class GlassmorphicStatusPill(QWidget):
         elif self.ai_status in ("CONTROLLING", "CONTROLLING DESKTOP..."):
             self.pill_status_lbl.setText("● CONTROLLING DESKTOP...")
             self.pill_status_lbl.setStyleSheet("color: #E4E4E7; font-weight: 500; font-size: 12px;")
-            return
-        elif self.ai_status in ("WAITING", "WAITING FOR YOU..."):
-            self.pill_status_lbl.setText("● WAITING FOR YOU...")
-            self.pill_status_lbl.setStyleSheet("color: #F59E0B; font-weight: 500; font-size: 12px;")
             return
 
         state_text = data.state.value

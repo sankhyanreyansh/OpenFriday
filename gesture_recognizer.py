@@ -132,10 +132,16 @@ class GestureRecognizer:
         self.prev_tip_pos: Optional[Tuple[float, float]] = None
         self.prev_time: Optional[float] = None
 
-        # Two-finger scroll tracking
+        # Two-finger scroll tracking & Inertial Momentum
         self.prev_scroll_y: Optional[float] = None
         self.scroll_accumulator: float = 0.0
         self.scroll_sensitivity = 1.0
+        self.scroll_velocity_y: float = 0.0
+        self.is_momentum_scrolling: bool = False
+        self.last_scroll_time: Optional[float] = None
+        self.last_momentum_time: Optional[float] = None
+        self.MOMENTUM_MIN_VELOCITY: float = 3.0
+        self.MOMENTUM_DECAY_RATE: float = 6.5
 
         # Three-finger space navigation & Mission Control tracking
         self.three_finger_history: List[Tuple[float, float, float]] = []
@@ -185,52 +191,66 @@ class GestureRecognizer:
         scale = max((wrist_to_middle + palm_breadth) * 0.5, 0.01)
         return scale
 
-    def _is_finger_curled(self, landmarks, tip_idx: int, pip_idx: int) -> bool:
-        """Returns True if the finger tip is curled close to palm/wrist."""
-        wrist = landmarks[self.WRIST]
-        tip_dist = self._euclidean_dist(landmarks[tip_idx], wrist)
-        pip_dist = self._euclidean_dist(landmarks[pip_idx], wrist)
-        return tip_dist <= pip_dist * 1.15
-
-    def _is_hand_fully_open(self, landmarks) -> bool:
-        """Returns True if all 5 fingers of the hand are extended."""
+    def _is_finger_extended(self, landmarks, tip_idx: int, pip_idx: int, mcp_idx: Optional[int] = None) -> bool:
+        """Returns True if the finger is extended (tilt and rotation invariant)."""
         if landmarks is None or len(landmarks) < 21:
             return False
         wrist = landmarks[self.WRIST]
-        thumb_ext = self._euclidean_dist(landmarks[self.THUMB_TIP], wrist) > self._euclidean_dist(landmarks[self.THUMB_MCP], wrist) * 1.10
-        idx_ext = (landmarks[self.INDEX_TIP].y < landmarks[self.INDEX_PIP].y) or (
-            self._euclidean_dist(landmarks[self.INDEX_TIP], wrist) > self._euclidean_dist(landmarks[self.INDEX_PIP], wrist) * 1.08
+        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
+        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
+        if mcp_idx is not None:
+            d_mcp_wrist = self._euclidean_dist(landmarks[mcp_idx], wrist)
+            return (d_tip_wrist > d_pip_wrist * 1.06) and (d_tip_wrist > d_mcp_wrist * 1.12)
+        return d_tip_wrist > d_pip_wrist * 1.06
+
+    def _is_finger_curled(self, landmarks, tip_idx: int, pip_idx: int, mcp_idx: Optional[int] = None) -> bool:
+        """Returns True if the finger tip is curled close to palm/wrist (tilt and rotation invariant)."""
+        if landmarks is None or len(landmarks) < 21:
+            return False
+        wrist = landmarks[self.WRIST]
+        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
+        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
+        if mcp_idx is not None:
+            d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
+            d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
+            return (d_tip_wrist <= d_pip_wrist * 1.15) or (d_tip_mcp <= d_pip_mcp * 1.20)
+        return d_tip_wrist <= d_pip_wrist * 1.15
+
+    def _is_thumb_extended(self, landmarks) -> bool:
+        """Returns True if the thumb is extended away from wrist and palm (tilt and rotation invariant)."""
+        if landmarks is None or len(landmarks) < 21:
+            return False
+        wrist = landmarks[self.WRIST]
+        thumb_tip = landmarks[self.THUMB_TIP]
+        thumb_mcp = landmarks[self.THUMB_MCP]
+        index_mcp = landmarks[self.INDEX_MCP]
+        return (
+            self._euclidean_dist(thumb_tip, wrist) > self._euclidean_dist(thumb_mcp, wrist) * 1.08 and
+            self._euclidean_dist(thumb_tip, index_mcp) > self._euclidean_dist(thumb_mcp, index_mcp) * 0.85
         )
-        mid_ext = (landmarks[self.MIDDLE_TIP].y < landmarks[self.MIDDLE_PIP].y) or (
-            self._euclidean_dist(landmarks[self.MIDDLE_TIP], wrist) > self._euclidean_dist(landmarks[self.MIDDLE_PIP], wrist) * 1.08
-        )
-        ring_ext = (landmarks[self.RING_TIP].y < landmarks[self.RING_PIP].y) or (
-            self._euclidean_dist(landmarks[self.RING_TIP], wrist) > self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.08
-        )
-        pinky_ext = (landmarks[self.PINKY_TIP].y < landmarks[self.PINKY_PIP].y) or (
-            self._euclidean_dist(landmarks[self.PINKY_TIP], wrist) > self._euclidean_dist(landmarks[self.PINKY_PIP], wrist) * 1.08
-        )
+
+    def _is_hand_fully_open(self, landmarks) -> bool:
+        """Returns True if all 5 fingers of the hand are extended (tilt and rotation invariant)."""
+        if landmarks is None or len(landmarks) < 21:
+            return False
+        thumb_ext = self._is_thumb_extended(landmarks)
+        idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
+        mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+        ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
+        pinky_ext = self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
         return thumb_ext and idx_ext and mid_ext and ring_ext and pinky_ext
 
     def _is_hand_fist(self, landmarks) -> bool:
-        """Returns True if all 4 fingers (Index, Middle, Ring, Pinky) are curled into a fist."""
+        """Returns True if all 4 fingers (Index, Middle, Ring, Pinky) are curled into a fist (tilt-invariant)."""
         if landmarks is None or len(landmarks) < 21:
             return False
-        wrist = landmarks[self.WRIST]
-        for tip_idx, pip_idx in [
-            (self.INDEX_TIP, self.INDEX_PIP),
-            (self.MIDDLE_TIP, self.MIDDLE_PIP),
-            (self.RING_TIP, self.RING_PIP),
-            (self.PINKY_TIP, self.PINKY_PIP),
+        for tip_idx, pip_idx, mcp_idx in [
+            (self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP),
+            (self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP),
+            (self.RING_TIP, self.RING_PIP, self.RING_MCP),
+            (self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP),
         ]:
-            tip = landmarks[tip_idx]
-            pip = landmarks[pip_idx]
-            is_curled = (
-                self._is_finger_curled(landmarks, tip_idx, pip_idx) or
-                (tip.y > pip.y) or
-                (self._euclidean_dist(tip, wrist) <= self._euclidean_dist(pip, wrist) * 1.15)
-            )
-            if not is_curled:
+            if not self._is_finger_curled(landmarks, tip_idx, pip_idx, mcp_idx):
                 return False
         return True
 
@@ -239,17 +259,19 @@ class GestureRecognizer:
         return self._is_hand_fist(left_landmarks)
 
     def _is_left_hand_extended(self, left_landmarks) -> bool:
-        """Returns True if left hand fingers are extended for Modifier (Shift) mode."""
+        """Returns True if left hand fingers are extended for Modifier (Shift) mode (tilt-invariant)."""
         if left_landmarks is None or len(left_landmarks) < 21:
             return False
-        wrist = left_landmarks[self.WRIST]
-        idx_ext = (left_landmarks[self.INDEX_TIP].y < left_landmarks[self.INDEX_PIP].y) or (
-            self._euclidean_dist(left_landmarks[self.INDEX_TIP], wrist) > self._euclidean_dist(left_landmarks[self.INDEX_PIP], wrist) * 1.05
-        )
-        mid_ext = (left_landmarks[self.MIDDLE_TIP].y < left_landmarks[self.MIDDLE_PIP].y) or (
-            self._euclidean_dist(left_landmarks[self.MIDDLE_TIP], wrist) > self._euclidean_dist(left_landmarks[self.MIDDLE_PIP], wrist) * 1.05
-        )
+        idx_ext = self._is_finger_extended(left_landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
+        mid_ext = self._is_finger_extended(left_landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
         return idx_ext and mid_ext
+
+    def cancel_momentum_scroll(self):
+        """Immediately cancels ongoing inertial momentum scrolling."""
+        self.is_momentum_scrolling = False
+        self.scroll_velocity_y = 0.0
+        self.scroll_accumulator = 0.0
+        self.last_momentum_time = None
 
     def get_stable_pointer_coords(self, landmarks) -> Tuple[float, float]:
         """
@@ -282,7 +304,7 @@ class GestureRecognizer:
         if self.is_radial_active:
             if landmarks is None or len(landmarks) < 21:
                 # Hands lowered / out of frame -> radial menu stays visible and locked open!
-                return GestureState.RADIAL_MENU, 0.0, 0, "Radial Wheel Active", screen_pos, None, None
+                return GestureState.RADIAL_MENU, 0.0, 0, "Radial Wheel Active", screen_pos, None, None, None
 
             sx, sy = screen_pos
             cx, cy = self.screen_center
@@ -424,28 +446,12 @@ class GestureRecognizer:
         self.prev_time = now
 
         wrist = landmarks[self.WRIST]
-        is_index_extended = (
-            (landmarks[self.INDEX_TIP].y < landmarks[self.INDEX_PIP].y) or
-            (self._euclidean_dist(landmarks[self.INDEX_TIP], wrist) > self._euclidean_dist(landmarks[self.INDEX_PIP], wrist) * 1.08)
-        )
-        is_middle_extended = (
-            (landmarks[self.MIDDLE_TIP].y < landmarks[self.MIDDLE_PIP].y) or
-            (self._euclidean_dist(landmarks[self.MIDDLE_TIP], wrist) > self._euclidean_dist(landmarks[self.MIDDLE_PIP], wrist) * 1.08)
-        )
-        is_ring_extended = (
-            (landmarks[self.RING_TIP].y < landmarks[self.RING_PIP].y) or
-            (self._euclidean_dist(landmarks[self.RING_TIP], wrist) > self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.08)
-        )
-        is_ring_curled = (
-            self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP) or
-            (landmarks[self.RING_TIP].y > landmarks[self.RING_PIP].y) or
-            (self._euclidean_dist(landmarks[self.RING_TIP], wrist) <= self._euclidean_dist(landmarks[self.RING_PIP], wrist) * 1.15)
-        )
-        is_pinky_curled = (
-            self._is_finger_curled(landmarks, self.PINKY_TIP, self.PINKY_PIP) or
-            (landmarks[self.PINKY_TIP].y > landmarks[self.PINKY_PIP].y) or
-            (self._euclidean_dist(landmarks[self.PINKY_TIP], wrist) <= self._euclidean_dist(landmarks[self.PINKY_PIP], wrist) * 1.15)
-        )
+        is_index_extended = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
+        is_middle_extended = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+        is_ring_extended = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
+        is_pinky_extended = self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
+        is_ring_curled = self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
+        is_pinky_curled = self._is_finger_curled(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
 
         # =========================================================================
         # PRIORITY 2: 3-FINGER SPATIAL NAVIGATION (Index + Middle + Ring Extended, Pinky Curled)
@@ -454,6 +460,7 @@ class GestureRecognizer:
 
         if is_three_finger:
             self.reset_pinch_states()
+            self.cancel_momentum_scroll()
             self.prev_scroll_y = None
             self.scroll_accumulator = 0.0
 
@@ -492,7 +499,6 @@ class GestureRecognizer:
                     self.last_swipe_time = now
                     self.three_finger_history.clear()
 
-
             return GestureState.SWIPE_NAV, 0.0, 0, status_msg, screen_pos, nav_action, None, None
 
         self.three_finger_history.clear()
@@ -510,12 +516,18 @@ class GestureRecognizer:
                 scroll_dy = 0
 
                 if self.prev_scroll_y is not None:
+                    dt = max(now - (self.last_scroll_time or now), 0.001)
                     delta_y = (self.prev_scroll_y - curr_y) * 140.0 * self.scroll_sensitivity
                     self.scroll_accumulator += delta_y
+                    instant_vel = delta_y / max(dt, 0.016)
+                    self.scroll_velocity_y = 0.55 * self.scroll_velocity_y + 0.45 * instant_vel
                     if abs(self.scroll_accumulator) >= 1.0:
                         scroll_dy = int(self.scroll_accumulator)
                         self.scroll_accumulator -= scroll_dy
+
                 self.prev_scroll_y = curr_y
+                self.last_scroll_time = now
+                self.is_momentum_scrolling = False
 
                 if scroll_dy > 0:
                     status_msg = f"Scrolling Up (+{scroll_dy})"
@@ -526,17 +538,24 @@ class GestureRecognizer:
 
                 return GestureState.SCROLLING, 0.0, scroll_dy, status_msg, screen_pos, None, None, None
             else:
+                if self.prev_scroll_y is not None and abs(self.scroll_velocity_y) > self.MOMENTUM_MIN_VELOCITY:
+                    self.is_momentum_scrolling = True
+                    self.last_momentum_time = now
                 self.prev_scroll_y = None
                 self.scroll_accumulator = 0.0
                 return GestureState.POINTING, 0.0, 0, "Two-Finger Neutral (Extend Left Hand to Scroll)", screen_pos, None, None, None
 
-        self.prev_scroll_y = None
-        self.scroll_accumulator = 0.0
+        # Exiting active scroll -> check if momentum should kick in
+        if self.prev_scroll_y is not None:
+            if abs(self.scroll_velocity_y) > self.MOMENTUM_MIN_VELOCITY:
+                self.is_momentum_scrolling = True
+                self.last_momentum_time = now
+            self.prev_scroll_y = None
 
         # =========================================================================
         # PRIORITY 5: 1-FINGER POINTING & PINCH CLICK DETECTION (Middle Finger Curled)
         # =========================================================================
-        middle_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP)
+        middle_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
 
 
         thumb_tip = landmarks[self.THUMB_TIP]
@@ -563,8 +582,31 @@ class GestureRecognizer:
             (is_stationary_knuckle and index_thumb_min_dist < (self.pinch_start_threshold * 1.15))
         )
 
+        if pinch_intent or self.is_pinching:
+            self.cancel_momentum_scroll()
+
+        # Handle Inertial Momentum Coasting when pointing
+        if not self.is_pinching and self.is_momentum_scrolling:
+            dt = max(now - (self.last_momentum_time or now), 0.001)
+            self.last_momentum_time = now
+            decay = math.exp(-self.MOMENTUM_DECAY_RATE * dt)
+            self.scroll_velocity_y *= decay
+            step_dy = self.scroll_velocity_y * dt * 25.0
+            self.scroll_accumulator += step_dy
+            momentum_dy = 0
+            if abs(self.scroll_accumulator) >= 1.0:
+                momentum_dy = int(self.scroll_accumulator)
+                self.scroll_accumulator -= momentum_dy
+
+            if abs(self.scroll_velocity_y) < self.MOMENTUM_MIN_VELOCITY:
+                self.cancel_momentum_scroll()
+
+            if momentum_dy != 0:
+                return GestureState.SCROLLING, 0.0, momentum_dy, "Coasting Scroll...", screen_pos, None, None, None
+
         if not self.is_pinching:
             if pinch_intent:
+                self.cancel_momentum_scroll()
                 self.is_pinching = True
                 self.pinch_start_time = now
                 self.pinch_freeze_x = sx
@@ -668,6 +710,7 @@ class GestureRecognizer:
 
     def reset_right_hand_states(self):
         self.reset_pinch_states()
+        self.cancel_momentum_scroll()
         self.prev_scroll_y = None
         self.scroll_accumulator = 0.0
         self.prev_knuckle_pos = None

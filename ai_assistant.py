@@ -204,23 +204,6 @@ COMPUTER_USE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "request_user_help",
-            "description": "Call this tool if you get stuck, cannot find an element after retrying, encounter a CAPTCHA/2FA, or need the user to position the cursor or focus a specific window.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "explanation": {
-                        "type": "string",
-                        "description": "Clear explanation spoken to the user describing what you need them to do."
-                    }
-                },
-                "required": ["explanation"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "finish_task",
             "description": "Complete the computer automation task and return a natural 1-sentence confirmation summary",
             "parameters": {
@@ -257,6 +240,10 @@ class AIAssistant:
         # Computer GUI controller
         self.controller = MacComputerController()
 
+        # Autonomous Computer Control & Abort state
+        self.is_controlling_desktop: bool = False
+        self.abort_event = threading.Event()
+
         # Primary OpenAI Client
         openai_key = os.getenv("OPENAI_API_KEY")
         if openai_key and openai_key.strip():
@@ -286,9 +273,9 @@ class AIAssistant:
             "     -> Answer directly in 1-2 concise sentences for spoken audio.\n"
             "   - If the user asks to visually explain a diagram, architecture, circuit, or find/highlight items on screen:\n"
             "     -> Call `annotate_screen`.\n\n"
-            "2. COMPUTER USE RECOVERY:\n"
+            "2. COMPUTER USE AUTONOMY:\n"
             "   - Always verify each action in the following screenshot.\n"
-            "   - If you struggle to locate an element after 2 attempts or require manual credentials/focus/CAPTCHA, call `request_user_help` to let the user know what assistance is needed rather than looping endlessly.\n\n"
+            "   - Execute tasks with complete autonomy from start to finish. Once the goal is completed, call `finish_task`.\n\n"
             "3. Spoken Audio: Respond naturally and concisely in 1 to 2 sentences suitable for spoken audio. Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
         )
 
@@ -310,6 +297,11 @@ class AIAssistant:
         # Concurrency & busy state locking
         self.is_busy: bool = False
         self.busy_lock = threading.Lock()
+
+    def abort_computer_agent(self):
+        """Signals the computer agent loop to immediately halt operations."""
+        print("[COMPUTER AGENT] Abort requested by user gesture!")
+        self.abort_event.set()
 
     def set_context_image(self, image_bytes: bytes):
         """Stores the most recent captured screen context image bytes."""
@@ -534,105 +526,191 @@ class AIAssistant:
             self._speak(fallback_msg)
             return fallback_msg
 
+        self.is_controlling_desktop = True
+        self.abort_event.clear()
+
         if on_status_change:
             on_status_change("CONTROLLING")
 
         print(f"\n[COMPUTER AGENT] Starting desktop GUI automation task: '{task_prompt}'")
         print(f"[COMPUTER AGENT] Display logical resolution: {self.controller.logical_width}x{self.controller.logical_height}")
 
-        # Capture initial frame to anchor initial perception
-        b64_init, init_w, init_h = self.controller.capture_screen_base64()
-
-        system_prompt = (
-            f"You are an expert desktop GUI automation agent interacting with a macOS screen of logical resolution {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
-            "COORDINATE SYSTEM & VISUAL REFERENCE:\n"
-            "- Provide all coordinates (x, y) on a normalized 0 to 1000 scale:\n"
-            "  * (0, 0) = Top-Left corner\n"
-            "  * (500, 500) = Exact center of the screen\n"
-            "  * (1000, 1000) = Bottom-Right corner\n"
-            "  * Typical browser search/address bars are located horizontally centered near the top: (500, 75) to (500, 120).\n"
-            "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes:\n"
-            "  * Vertical grid lines mark X coordinates: 100, 200, 300, ..., 900.\n"
-            "  * Horizontal grid lines mark Y coordinates: 100, 200, 300, ..., 900.\n"
-            "- Inspect these labeled grid lines to accurately locate targets and emit precise (x, y) click coordinates or [ymin, xmin, ymax, xmax] bounding boxes.\n\n"
-            "COMPUTER USE AGENT INSTRUCTIONS:\n"
-            "1. END-TO-END AUTONOMY: When given a multi-step request (e.g. 'Open Chrome, go to YouTube, and search jazz', or 'type in search bar, press enter, and click first link'):\n"
-            "   - Execute all necessary actions sequentially across iterations.\n"
-            "   - DO NOT stop after step 1 to ask for user confirmation or input.\n"
-            "   - Continue iterating through the perception-action loop until the entire objective is completed.\n"
-            "   - Only call `finish_task` when the final goal is fully achieved and visible on screen.\n\n"
-            "2. MANDATORY VISUAL VERIFICATION:\n"
-            "   - On every iteration (from iteration 2 onwards), first inspect the latest screenshot to verify that your previous action produced the intended UI change.\n"
-            "   - If you clicked a search box, verify that the cursor is active before typing.\n"
-            "   - If you typed text, confirm the text actually appears in the field before pressing Enter.\n"
-            "   - If an action missed or failed, adjust your normalized coordinates and retry immediately.\n\n"
-            "3. Take discrete actions per turn (click, type, or press key) to allow observation on the next iteration.\n"
-            "4. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
-        )
-
-        init_img_content = {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:image/png;base64,{b64_init}"
-            }
-        }
-
-        messages: List[Dict[str, Any]] = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": f"Task: {task_prompt}\nInitial screen state:"},
-                    init_img_content,
-                ]
-            }
-        ]
-
         summary = "Completed desktop task."
 
-        for iteration in range(max_iterations):
-            print(f"\n[COMPUTER AGENT] --- Iteration {iteration + 1}/{max_iterations} ---")
-            print(f"[COMPUTER AGENT] Querying {self.computer_use_model} for next UI action...")
+        try:
+            # Capture initial frame to anchor initial perception
+            b64_init, init_w, init_h = self.controller.capture_screen_base64()
 
-            try:
+            system_prompt = (
+                f"You are an expert desktop GUI automation agent interacting with a macOS screen of logical resolution {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
+                "COORDINATE SYSTEM & VISUAL REFERENCE:\n"
+                "- Provide all coordinates (x, y) on a normalized 0 to 1000 scale:\n"
+                "  * (0, 0) = Top-Left corner\n"
+                "  * (500, 500) = Exact center of the screen\n"
+                "  * (1000, 1000) = Bottom-Right corner\n"
+                "  * Typical browser search/address bars are located horizontally centered near the top: (500, 75) to (500, 120).\n"
+                "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes:\n"
+                "  * Vertical grid lines mark X coordinates: 100, 200, 300, ..., 900.\n"
+                "  * Horizontal grid lines mark Y coordinates: 100, 200, 300, ..., 900.\n"
+                "- Inspect these labeled grid lines to accurately locate targets and emit precise (x, y) click coordinates or [ymin, xmin, ymax, xmax] bounding boxes.\n\n"
+                "COMPUTER USE AGENT INSTRUCTIONS:\n"
+                "1. END-TO-END AUTONOMY: When given a multi-step request (e.g. 'Open Chrome, go to YouTube, and search jazz', or 'type in search bar, press enter, and click first link'):\n"
+                "   - Execute all necessary actions sequentially across iterations.\n"
+                "   - DO NOT stop after step 1 to ask for user confirmation or input.\n"
+                "   - Continue iterating through the perception-action loop until the entire objective is completed.\n"
+                "   - Only call `finish_task` when the final goal is fully achieved and visible on screen.\n\n"
+                "2. MANDATORY VISUAL VERIFICATION:\n"
+                "   - On every iteration (from iteration 2 onwards), first inspect the latest screenshot to verify that your previous action produced the intended UI change.\n"
+                "   - If you clicked a search box, verify that the cursor is active before typing.\n"
+                "   - If you typed text, confirm the text actually appears in the field before pressing Enter.\n"
+                "   - If an action missed or failed, adjust your normalized coordinates and retry immediately.\n\n"
+                "3. Take discrete actions per turn (click, type, or press key) to allow observation on the next iteration.\n"
+                "4. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
+            )
+
+            init_img_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/png;base64,{b64_init}"
+                }
+            }
+
+            messages: List[Dict[str, Any]] = [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"Task: {task_prompt}\nInitial screen state:"},
+                        init_img_content,
+                    ]
+                }
+            ]
+
+            for iteration in range(max_iterations):
+                if self.abort_event.is_set():
+                    print("[COMPUTER AGENT] Abort signal received. Halting computer agent loop immediately.")
+                    summary = "Desktop control aborted."
+                    break
+
+                print(f"\n[COMPUTER AGENT] --- Iteration {iteration + 1}/{max_iterations} ---")
+                print(f"[COMPUTER AGENT] Querying {self.computer_use_model} for next UI action...")
+
                 try:
-                    response = self.openai_client.chat.completions.create(
-                        model=self.computer_use_model,
-                        messages=messages,
-                        tools=COMPUTER_USE_TOOLS,
-                        tool_choice="auto",
-                        max_completion_tokens=350,
-                        temperature=0.2,
-                    )
-                except Exception as param_err:
-                    if "temperature" in str(param_err).lower() or "unsupported_parameter" in str(param_err).lower():
+                    try:
                         response = self.openai_client.chat.completions.create(
                             model=self.computer_use_model,
                             messages=messages,
                             tools=COMPUTER_USE_TOOLS,
                             tool_choice="auto",
                             max_completion_tokens=350,
+                            temperature=0.2,
                         )
+                    except Exception as param_err:
+                        if "temperature" in str(param_err).lower() or "unsupported_parameter" in str(param_err).lower():
+                            response = self.openai_client.chat.completions.create(
+                                model=self.computer_use_model,
+                                messages=messages,
+                                tools=COMPUTER_USE_TOOLS,
+                                tool_choice="auto",
+                                max_completion_tokens=350,
+                            )
+                        else:
+                            raise param_err
+                except Exception as e:
+                    print(f"[COMPUTER AGENT ERROR] Model inference failed at step {iteration+1}: {e}")
+                    break
+
+                if self.abort_event.is_set():
+                    print("[COMPUTER AGENT] Abort signal received after inference. Halting loop.")
+                    summary = "Desktop control aborted."
+                    break
+
+                msg = response.choices[0].message
+                messages.append(msg)
+
+                if not msg.tool_calls:
+                    text_content = msg.content or ""
+                    print(f"[COMPUTER AGENT] Model returned text without tool calls: {text_content}")
+                    if iteration < max_iterations - 1:
+                        b64_next, next_w, next_h = self.controller.capture_screen_base64()
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Continue executing the next action to achieve the goal. Do not stop until calling finish_task.",
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/png;base64,{b64_next}"
+                                    }
+                                }
+                            ]
+                        })
+                        continue
                     else:
-                        raise param_err
-            except Exception as e:
-                print(f"[COMPUTER AGENT ERROR] Model inference failed at step {iteration+1}: {e}")
-                break
+                        summary = text_content or "Completed desktop task."
+                        break
 
-            msg = response.choices[0].message
-            messages.append(msg)
+                finished = False
+                print(f"[COMPUTER AGENT] Model emitted {len(msg.tool_calls)} action(s): {[tc.function.name for tc in msg.tool_calls]}")
 
-            if not msg.tool_calls:
-                text_content = msg.content or ""
-                print(f"[COMPUTER AGENT] Model returned text without tool calls: {text_content}")
+                for tool_call in msg.tool_calls:
+                    if self.abort_event.is_set():
+                        print("[COMPUTER AGENT] Abort signal received before tool execution. Halting loop.")
+                        summary = "Desktop control aborted."
+                        finished = True
+                        break
+
+                    func_name = tool_call.function.name
+                    try:
+                        args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                    except Exception:
+                        args = {}
+
+                    print(f"[COMPUTER AGENT] Executing action: {func_name}({args})")
+
+                    if func_name == "finish_task":
+                        summary = args.get("summary", "Task completed.")
+                        finished = True
+                        tool_result = f"Task marked finished: {summary}"
+                    elif func_name in self.available_tools:
+                        func = self.available_tools[func_name]
+                        try:
+                            tool_result = func(**args)
+                        except Exception as te:
+                            tool_result = f"Error executing {func_name}: {te}"
+                    else:
+                        tool_result = f"Unknown tool: {func_name}"
+
+                    print(f"[COMPUTER AGENT] Action result: {tool_result}")
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": f"{tool_result}. Observe the next screenshot to verify outcome.",
+                    })
+
+                # Add settling delay so UI animations, focus changes, and popups render before capture
+                time.sleep(0.35)
+
+                if finished or self.abort_event.is_set():
+                    if self.abort_event.is_set():
+                        summary = "Desktop control aborted."
+                    print(f"[COMPUTER AGENT] Goal achieved / loop ended on iteration {iteration + 1}!")
+                    break
+
+                # Capture updated live screenshot for next iteration if loop continues
                 if iteration < max_iterations - 1:
                     b64_next, next_w, next_h = self.controller.capture_screen_base64()
+                    print(f"[COMPUTER AGENT] Live screenshot updated: {next_w}x{next_h} px")
                     messages.append({
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Continue executing the next action to achieve the goal. Do not stop until calling finish_task.",
+                                "text": f"[Step {iteration+2}]: Updated live screenshot. Verify outcome of previous action and determine next step.",
                             },
                             {
                                 "type": "image_url",
@@ -642,78 +720,8 @@ class AIAssistant:
                             }
                         ]
                     })
-                    continue
-                else:
-                    summary = text_content or "Completed desktop task."
-                    break
-
-            finished = False
-            print(f"[COMPUTER AGENT] Model emitted {len(msg.tool_calls)} action(s): {[tc.function.name for tc in msg.tool_calls]}")
-
-            for tool_call in msg.tool_calls:
-                func_name = tool_call.function.name
-                try:
-                    args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                except Exception:
-                    args = {}
-
-                print(f"[COMPUTER AGENT] Executing action: {func_name}({args})")
-
-                if func_name == "finish_task":
-                    summary = args.get("summary", "Task completed.")
-                    finished = True
-                    tool_result = f"Task marked finished: {summary}"
-                elif func_name == "request_user_help":
-                    explanation = args.get("explanation", "I need your assistance to proceed.")
-                    print(f"[COMPUTER AGENT] request_user_help triggered: {explanation}")
-                    summary = explanation
-                    finished = True
-                    tool_result = f"Paused computer agent to request user help: {explanation}"
-                    if on_status_change:
-                        on_status_change("WAITING")
-                elif func_name in self.available_tools:
-                    func = self.available_tools[func_name]
-                    try:
-                        tool_result = func(**args)
-                    except Exception as te:
-                        tool_result = f"Error executing {func_name}: {te}"
-                else:
-                    tool_result = f"Unknown tool: {func_name}"
-
-                print(f"[COMPUTER AGENT] Action result: {tool_result}")
-
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": f"{tool_result}. Observe the next screenshot to verify outcome.",
-                })
-
-            # Add settling delay so UI animations, focus changes, and popups render before capture
-            time.sleep(0.35)
-
-            if finished:
-                print(f"[COMPUTER AGENT] Goal achieved / paused on iteration {iteration + 1}!")
-                break
-
-            # Capture updated live screenshot for next iteration if loop continues
-            if iteration < max_iterations - 1:
-                b64_next, next_w, next_h = self.controller.capture_screen_base64()
-                print(f"[COMPUTER AGENT] Live screenshot updated: {next_w}x{next_h} px")
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"[Step {iteration+2}]: Updated live screenshot. Verify outcome of previous action and determine next step.",
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{b64_next}"
-                            }
-                        }
-                    ]
-                })
+        finally:
+            self.is_controlling_desktop = False
 
         print(f"[COMPUTER AGENT] Final Summary: {summary}\n")
 
@@ -729,7 +737,7 @@ class AIAssistant:
             except Exception:
                 pass
 
-        if on_status_change and not (func_name == "request_user_help" if 'func_name' in locals() else False):
+        if on_status_change:
             on_status_change("SPEAKING")
 
         self._speak(summary)
@@ -811,11 +819,6 @@ class AIAssistant:
                         on_status_change=on_status_change,
                         on_reply_generated=on_reply_generated,
                     )
-                elif func_name == "request_user_help":
-                    explanation = func_args.get("explanation", "I need your assistance to proceed.")
-                    if on_status_change:
-                        on_status_change("WAITING")
-                    return explanation
                 elif func_name == "annotate_screen":
                     spoken_summary = func_args.get("spoken_response", "Here is the visual breakdown.")
                     anns = func_args.get("annotations", [])

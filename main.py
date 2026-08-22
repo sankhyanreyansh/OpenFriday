@@ -7,6 +7,7 @@ Rock-solid Velocity-Adaptive EMA motion smoothing, and 60 FPS multi-threaded pip
 
 import sys
 import os
+import json
 import signal
 import argparse
 
@@ -22,9 +23,23 @@ from hud_sidebar import GlassmorphicHUDPanel, HUDContextCard
 import permissions
 
 
+def load_config() -> dict:
+    """Loads configuration settings from config.json if available."""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            print(f"Loaded configuration from {config_path}")
+            return cfg
+        except Exception as e:
+            print(f"Warning: Failed to load config.json: {e}")
+    return {}
+
+
 def main():
     parser = argparse.ArgumentParser(description="FRIDAY - macOS Hand Gesture Desktop Controller")
-    parser.add_argument("--camera", type=int, default=0, help="Camera device index (default: 0)")
+    parser.add_argument("--camera", type=int, default=None, help="Camera device index")
     parser.add_argument("--no-overlay", action="store_true", help="Disable transparent on-screen HUD reticle")
     parser.add_argument("--no-sidebar", action="store_true", help="Disable glassmorphic HUD pill")
     args = parser.parse_args()
@@ -32,6 +47,12 @@ def main():
     print("Initializing FRIDAY...")
 
     try:
+        # Load startup configuration from config.json
+        config_settings = load_config()
+
+        # Command line arguments override config file
+        cam_id = args.camera if args.camera is not None else int(config_settings.get("camera_id", 0))
+
         # 0. Configure macOS Accessory Activation Policy (Daemon / Agent mode)
         permissions.set_macos_accessory_policy()
 
@@ -55,7 +76,13 @@ def main():
         annotation_overlay = ARAnnotationOverlay() if not args.no_overlay else None
 
         # 2. Background Vision Engine
-        vision_thread = VisionEngine(camera_id=args.camera, mouse_controller=mouse_ctrl)
+        vision_thread = VisionEngine(camera_id=cam_id, mouse_controller=mouse_ctrl)
+
+        # Apply startup config settings
+        if config_settings:
+            vision_thread.update_settings(config_settings)
+            if reticle_overlay:
+                reticle_overlay.update_settings(config_settings)
 
         # 3. Wire Qt Signal Connections
         if hud_pill:
