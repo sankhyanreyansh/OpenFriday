@@ -1,7 +1,7 @@
 """
-Velocity-Adaptive EMA & One-Euro Motion Smoothing for FRIDAY.
-Implements instantaneous hand velocity scaling with heavy stationary dampening (alpha ~ 0.03),
-smooth non-abrupt velocity progression (up to 0.92), and an enforced 6px stationary deadzone.
+One-Euro Dynamic Smoothing & Adaptive Motion Filtering for FRIDAY.
+Implements the 1€ Filter algorithm for human-computer interaction,
+eliminating jitter at low velocities while preserving zero-lag precision during rapid movements.
 """
 
 import math
@@ -9,131 +9,101 @@ import time
 from typing import Tuple, Optional
 
 
-class VelocityAdaptiveEMAFilter:
+def smoothing_factor(t_e: float, cutoff: float) -> float:
+    """Calculates alpha smoothing coefficient from sample interval and cutoff frequency."""
+    r = 2.0 * math.pi * cutoff * t_e
+    return r / (r + 1.0)
+
+
+def exponential_smoothing(a: float, x: float, x_prev: float) -> float:
+    """Computes low-pass exponential smoothing."""
+    return a * x + (1.0 - a) * x_prev
+
+
+class OneEuroFilter:
     """
-    Velocity-Adaptive Exponential Moving Average (EMA) filter.
-    Heavily dampens slow/micro movements while tracking fast motions with zero latency.
+    1D One-Euro Filter.
+    Adapts cutoff frequency dynamically based on signal derivative (speed).
     """
 
     def __init__(
         self,
-        base_alpha: float = 0.03,
-        velocity_scale: float = 0.0018,
-        deadzone_px: float = 6.0,
+        t0: float,
+        x0: float,
+        dx0: float = 0.0,
+        min_cutoff: float = 1.2,
+        beta: float = 0.015,
+        d_cutoff: float = 1.0,
     ):
-        self.base_alpha = float(base_alpha)
-        self.velocity_scale = float(velocity_scale)
-        self.deadzone_px = float(deadzone_px)
-
-        self.prev_smooth_x: Optional[float] = None
-        self.prev_smooth_y: Optional[float] = None
-        self.prev_raw_x: Optional[float] = None
-        self.prev_raw_y: Optional[float] = None
-        self.prev_time: Optional[float] = None
-
-    def update_params(self, min_cutoff: float, beta: float):
-        """Updates base alpha and velocity responsiveness."""
-        self.base_alpha = max(0.01, min(0.40, float(min_cutoff)))
-        self.velocity_scale = max(0.0001, float(beta))
-
-    def filter(self, x: float, y: float, timestamp: Optional[float] = None) -> Tuple[float, float]:
-        if timestamp is None:
-            timestamp = time.time()
-
-        if self.prev_smooth_x is None or self.prev_time is None:
-            self.prev_smooth_x = x
-            self.prev_smooth_y = y
-            self.prev_raw_x = x
-            self.prev_raw_y = y
-            self.prev_time = timestamp
-            return x, y
-
-        dt = max(timestamp - self.prev_time, 0.001)
-        self.prev_time = timestamp
-
-        # If tracking was interrupted (gap > 150ms), snap to target
-        if dt > 0.15:
-            self.prev_smooth_x = x
-            self.prev_smooth_y = y
-            self.prev_raw_x = x
-            self.prev_raw_y = y
-            return x, y
-
-        # 1. Calculate Instantaneous Velocity in screen pixels/sec:
-        # v = sqrt((x_t - x_{t-1})^2 + (y_t - y_{t-1})^2) / dt
-        dx = x - self.prev_raw_x
-        dy = y - self.prev_raw_y
-        v = math.hypot(dx, dy) / dt
-        self.prev_raw_x = x
-        self.prev_raw_y = y
-
-        # 2. Smooth progressive alpha scaling without abrupt jumps:
-        # alpha = clamp(base_alpha + (v * velocity_scale), base_alpha, 0.92)
-        alpha = max(self.base_alpha, min(0.92, self.base_alpha + (v * self.velocity_scale)))
-
-        # 3. Apply smoothed coordinates:
-        # pos_smooth = alpha * pos_raw + (1 - alpha) * pos_smooth_prev
-        smooth_x = alpha * x + (1.0 - alpha) * self.prev_smooth_x
-        smooth_y = alpha * y + (1.0 - alpha) * self.prev_smooth_y
-
-        # 4. Enforced 6px Stationary Deadzone:
-        # If delta < 6px, keep position strictly locked to previous frame
-        delta = math.hypot(smooth_x - self.prev_smooth_x, smooth_y - self.prev_smooth_y)
-        if delta < self.deadzone_px:
-            return self.prev_smooth_x, self.prev_smooth_y
-
-        # Huge jump snap protection (> 450px)
-        if delta > 450.0:
-            self.prev_smooth_x = x
-            self.prev_smooth_y = y
-            return x, y
-
-        self.prev_smooth_x = smooth_x
-        self.prev_smooth_y = smooth_y
-        return smooth_x, smooth_y
-
-    def reset(self):
-        self.prev_smooth_x = None
-        self.prev_smooth_y = None
-        self.prev_raw_x = None
-        self.prev_raw_y = None
-        self.prev_time = None
-
-
-Point2DOneEuroFilter = VelocityAdaptiveEMAFilter
-
-
-class OneEuroFilter:
-    """1D Adaptive low-pass filter."""
-
-    def __init__(self, min_cutoff: float = 0.03, beta: float = 0.0018):
         self.min_cutoff = float(min_cutoff)
         self.beta = float(beta)
-        self.prev_val: Optional[float] = None
-        self.prev_raw: Optional[float] = None
-        self.prev_time: Optional[float] = None
+        self.d_cutoff = float(d_cutoff)
+        self.x_prev = float(x0)
+        self.dx_prev = float(dx0)
+        self.t_prev = float(t0)
 
-    def filter(self, value: float, timestamp: Optional[float] = None) -> float:
-        if timestamp is None:
-            timestamp = time.time()
-        if self.prev_val is None or self.prev_time is None:
-            self.prev_val = value
-            self.prev_raw = value
-            self.prev_time = timestamp
-            return value
+    def filter(self, t: float, x: float) -> float:
+        t_e = max(t - self.t_prev, 1e-5)
+        a_d = smoothing_factor(t_e, self.d_cutoff)
+        dx = (x - self.x_prev) / t_e
+        dx_hat = exponential_smoothing(a_d, dx, self.dx_prev)
 
-        dt = max(timestamp - self.prev_time, 0.001)
-        self.prev_time = timestamp
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = smoothing_factor(t_e, cutoff)
+        x_hat = exponential_smoothing(a, x, self.x_prev)
 
-        v = abs(value - self.prev_raw) / dt
-        self.prev_raw = value
+        self.x_prev = x_hat
+        self.dx_prev = dx_hat
+        self.t_prev = t
+        return x_hat
 
-        alpha = max(self.min_cutoff, min(0.92, self.min_cutoff + v * self.beta))
-        res = alpha * value + (1.0 - alpha) * self.prev_val
-        self.prev_val = res
-        return res
+
+class CursorSmoother:
+    """
+    2D Cursor Motion Smoother utilizing dual One-Euro filters for X and Y coordinates.
+    Guarantees jitter-free stationary pointing and zero-lag tracking during high-speed gestures.
+    """
+
+    def __init__(
+        self,
+        min_cutoff: float = 1.2,
+        beta: float = 0.015,
+        d_cutoff: float = 1.0,
+    ):
+        t = time.time()
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self.filter_x = OneEuroFilter(t, 0.0, min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+        self.filter_y = OneEuroFilter(t, 0.0, min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+        self.initialized = False
+
+    def smooth(self, raw_screen_x: float, raw_screen_y: float) -> Tuple[int, int]:
+        """Filters 2D screen coordinates and returns integer pixel positions."""
+        t = time.time()
+        if not self.initialized:
+            self.filter_x = OneEuroFilter(t, raw_screen_x, min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+            self.filter_y = OneEuroFilter(t, raw_screen_y, min_cutoff=self.min_cutoff, beta=self.beta, d_cutoff=self.d_cutoff)
+            self.initialized = True
+            return int(round(raw_screen_x)), int(round(raw_screen_y))
+
+        smooth_x = self.filter_x.filter(t, raw_screen_x)
+        smooth_y = self.filter_y.filter(t, raw_screen_y)
+        return int(round(smooth_x)), int(round(smooth_y))
 
     def reset(self):
-        self.prev_val = None
-        self.prev_raw = None
-        self.prev_time = None
+        """Resets smoother state when hand tracking is lost or re-acquired."""
+        self.initialized = False
+
+    def update_params(self, min_cutoff: float, beta: float, d_cutoff: Optional[float] = None):
+        """Updates filter sensitivity parameters."""
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        if d_cutoff is not None:
+            self.d_cutoff = float(d_cutoff)
+        self.initialized = False
+
+
+# Backwards compatibility
+VelocityAdaptiveEMAFilter = CursorSmoother
+Point2DOneEuroFilter = CursorSmoother

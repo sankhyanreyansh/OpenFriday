@@ -23,7 +23,7 @@ import mediapipe as mp
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, QBuffer, QIODevice
 from PyQt6.QtGui import QImage, QGuiApplication
 from landmark_smoother import LandmarkSmoother
-from one_euro_filter import VelocityAdaptiveEMAFilter
+from one_euro_filter import CursorSmoother, OneEuroFilter
 from gesture_recognizer import GestureRecognizer, GestureState, GestureData
 from mouse_controller import MouseController
 from dictation_engine import VoiceDictationEngine
@@ -134,11 +134,11 @@ class VisionEngine(QThread):
         self.is_dictating = False
         self.current_dictation_mode: str = "CLIPBOARD"
         
-        # Hardcoded Optimal Tracking Constants
-        # smoothing = 0.2, responsiveness = 0.003, pinch_sensitivity = 0.4, scroll_speed = 1.0
-        self.pointer_smoothing = 0.2
-        self.pointer_beta = 0.003
-        self.filter = VelocityAdaptiveEMAFilter(base_alpha=0.2, velocity_scale=0.003, deadzone_px=4.0)
+        # One-Euro Dynamic Cursor Smoothing (min_cutoff=1.2, beta=0.015, d_cutoff=1.0)
+        self.pointer_smoothing = 1.2
+        self.pointer_beta = 0.015
+        self.cursor_smoother = CursorSmoother(min_cutoff=1.2, beta=0.015, d_cutoff=1.0)
+        self.filter = self.cursor_smoother
 
         # Operational Flags
         self.running = False
@@ -193,13 +193,11 @@ class VisionEngine(QThread):
         if "smoothing" in settings:
             cutoff = float(settings["smoothing"])
             self.pointer_smoothing = cutoff
-            beta = self.pointer_beta
-            self.filter.update_params(cutoff, beta)
+            self.cursor_smoother.update_params(cutoff, self.pointer_beta)
         if "responsiveness" in settings:
             beta = float(settings["responsiveness"])
-            cutoff = self.pointer_smoothing
             self.pointer_beta = beta
-            self.filter.update_params(cutoff, beta)
+            self.cursor_smoother.update_params(self.pointer_smoothing, beta)
         if "pinch_threshold" in settings:
             self.gesture_recognizer.pinch_start_threshold = float(settings["pinch_threshold"])
             self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_threshold"]) + 0.14
@@ -466,16 +464,18 @@ class VisionEngine(QThread):
                         raw_x, raw_y = self.gesture_recognizer.get_stable_pointer_coords(smoothed_landmarks)
 
                         unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
-                        filtered_sx, filtered_sy = self.filter.filter(unfiltered_sx, unfiltered_sy, now)
+
+                        # Apply One-Euro dynamic smoothing strictly to cursor coordinates
+                        cursor_x, cursor_y = self.cursor_smoother.smooth(unfiltered_sx, unfiltered_sy)
 
                         gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
                             smoothed_landmarks,
-                            (filtered_sx, filtered_sy),
+                            (cursor_x, cursor_y),
                             left_landmarks=left_hand_landmarks,
                             now=now,
                         )
 
-                        screen_x, screen_y = effective_pos
+                        screen_x, screen_y = cursor_x, cursor_y
 
                         if self.mouse_control_enabled:
                             self._handle_mouse_events(gesture_state, screen_x, screen_y, scroll_dy, nav_action)
@@ -501,7 +501,7 @@ class VisionEngine(QThread):
                     else:
                         # Right hand not in frame:
                         self.landmark_smoother.reset()
-                        self.filter.reset()
+                        self.cursor_smoother.reset()
                         if self.was_dragging:
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
@@ -527,7 +527,7 @@ class VisionEngine(QThread):
                             fps=fps_smoothing,
                             status_message=status_msg,
                             is_modifier_active=(left_hand_landmarks is not None),
-                            nav_action=None,
+                            nav_action=nav_action,
                             radial_sector=radial_sector,
                             snip_box=snip_box,
                         )
@@ -584,28 +584,33 @@ class VisionEngine(QThread):
         scroll_dy: int,
         nav_action: Optional[str] = None,
     ):
-        """Executes native mouse actions according to gesture state machine."""
+        """Executes native mouse actions according to gesture state machine while maintaining continuous tracking."""
         if state == GestureState.NONE:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
             return
 
-        # Snipping Mode (Freeze mouse drag and clicks)
+        # Continuous cursor movement across all navigation, gestures, and active states
+        # (Only freeze when speaking / listening / transcribing)
+        if state not in (GestureState.LISTENING, GestureState.TRANSCRIBING, GestureState.AI_LISTENING):
+            self.mouse_controller.move_to(screen_x, screen_y)
+
+        # Snipping Mode (Freeze mouse drag and clicks during snip selection)
         if state in (GestureState.SNIP_DRAG, GestureState.SNIP_RELEASE):
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
             return
 
-        # Voice Dictation & AI Assistant (Freeze cursor movement and clicks)
+        # Voice Dictation & AI Assistant (Freeze mouse drag and clicks during voice)
         if state in (GestureState.LISTENING, GestureState.TRANSCRIBING, GestureState.AI_LISTENING):
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
             return
 
-        # Radial Shortcut Menu (Freeze standard mouse actions & execute triggered shortcut)
+        # Radial Shortcut Menu (Execute triggered shortcut)
         if state == GestureState.RADIAL_MENU:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
@@ -614,7 +619,7 @@ class VisionEngine(QThread):
                 self.mouse_controller.trigger_shortcut(nav_action)
             return
 
-        # 3-Finger Spatial Navigation (Freeze cursor movement and clicks)
+        # 3-Finger Spatial Navigation (Execute spaces / mission control)
         if state == GestureState.SWIPE_NAV:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
@@ -627,10 +632,7 @@ class VisionEngine(QThread):
                 self.mouse_controller.trigger_mission_control()
             return
 
-        # Pointer movement
-        if state in (GestureState.POINTING, GestureState.PINCHING, GestureState.DRAGGING, GestureState.SCROLLING):
-            self.mouse_controller.move_to(screen_x, screen_y)
-
+        # Dragging state
         if state == GestureState.DRAGGING:
             if not self.was_dragging:
                 self.mouse_controller.mouse_down(screen_x, screen_y)
@@ -640,6 +642,7 @@ class VisionEngine(QThread):
                 self.mouse_controller.mouse_up(screen_x, screen_y)
                 self.was_dragging = False
 
+        # Click actions
         if state == GestureState.CLICK:
             self.mouse_controller.click(screen_x, screen_y)
 
