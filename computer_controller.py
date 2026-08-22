@@ -12,6 +12,8 @@ from typing import Tuple
 from PIL import ImageGrab
 import Quartz.CoreGraphics as CG
 
+from grid_overlay import draw_visual_coordinate_grid
+
 
 class MacComputerController:
     """Controls mouse, keyboard, and screen capture on macOS natively via Quartz and AppleScript."""
@@ -25,14 +27,18 @@ class MacComputerController:
         self.last_capture_width = self.logical_width
         self.last_capture_height = self.logical_height
 
-    def capture_screen_base64(self) -> Tuple[str, int, int]:
+    def capture_screen_base64(self, apply_grid: bool = True) -> Tuple[str, int, int]:
         """
         Captures the primary display into a compressed PNG base64 string,
         strictly preserving the native 1:1 screen aspect ratio without distortion.
+        Optionally overlays a 0-1000 coordinate grid for VLM spatial localization.
         Returns:
             (base64_str, current_image_width, current_image_height)
         """
         screenshot = ImageGrab.grab()
+        if apply_grid:
+            screenshot = draw_visual_coordinate_grid(screenshot)
+
         raw_w, raw_h = screenshot.size
 
         # Scale to max 1280px width while strictly preserving aspect ratio
