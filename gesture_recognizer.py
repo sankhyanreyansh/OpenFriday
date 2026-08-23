@@ -808,5 +808,64 @@ class GestureRecognizer:
         self.dual_open_start_time = None
         self.is_radial_active = False
 
+    @staticmethod
+    def _segments_intersect(p1: Tuple[float, float], p2: Tuple[float, float], p3: Tuple[float, float], p4: Tuple[float, float]) -> bool:
+        """Determines if 2D line segment p1-p2 intersects with segment p3-p4."""
+        def ccw(a, b, c):
+            return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+        return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+    def is_crossed_abort_gesture(
+        self,
+        right_landmarks: Optional[List[Any]],
+        left_landmarks: Optional[List[Any]]
+    ) -> bool:
+        """
+        Detects crossed hands, crossed arms/wrists, or crossed fingers forming an 'X' or cross shape.
+        Used as the dedicated, unconflicted abort gesture during autonomous computer use.
+        """
+        # 1. Dual-Hand Cross (Hands crossed, arms/wrists crossed, or index fingers crossed)
+        if right_landmarks is not None and left_landmarks is not None:
+            r0 = (right_landmarks[0].x, right_landmarks[0].y)   # Right Wrist
+            r8 = (right_landmarks[8].x, right_landmarks[8].y)   # Right Index Tip
+            r9 = (right_landmarks[9].x, right_landmarks[9].y)   # Right Middle MCP
+            r5 = (right_landmarks[5].x, right_landmarks[5].y)   # Right Index MCP
+
+            l0 = (left_landmarks[0].x, left_landmarks[0].y)    # Left Wrist
+            l8 = (left_landmarks[8].x, left_landmarks[8].y)    # Left Index Tip
+            l9 = (left_landmarks[9].x, left_landmarks[9].y)    # Left Middle MCP
+            l5 = (left_landmarks[5].x, left_landmarks[5].y)    # Left Index MCP
+
+            # A. Palm/Arm vectors intersect: Wrist -> Middle MCP
+            if self._segments_intersect(r0, r9, l0, l9):
+                return True
+
+            # B. Hand vectors intersect: Wrist -> Index Tip
+            if self._segments_intersect(r0, r8, l0, l8):
+                return True
+
+            # C. Index fingers crossed in an 'X': Index MCP -> Index Tip
+            if self._segments_intersect(r5, r8, l5, l8):
+                return True
+
+            # D. Spatial wrist-to-finger inversion cross (hands crossed over each other in space)
+            if (l0[0] > r0[0] and l8[0] < r8[0]) or (r0[0] > l0[0] and r8[0] < l8[0]):
+                wrist_dist = math.hypot(r0[0] - l0[0], r0[1] - l0[1])
+                tip_dist = math.hypot(r8[0] - l8[0], r8[1] - l8[1])
+                if wrist_dist < 0.45 and tip_dist < 0.45:
+                    return True
+
+        # 2. Single-Hand Crossed Fingers (Index & Middle finger crossed on one hand)
+        for lm in (right_landmarks, left_landmarks):
+            if lm is not None:
+                p5 = (lm[5].x, lm[5].y)    # Index MCP
+                p8 = (lm[8].x, lm[8].y)    # Index Tip
+                p9 = (lm[9].x, lm[9].y)    # Middle MCP
+                p12 = (lm[12].x, lm[12].y) # Middle Tip
+                if self._segments_intersect(p5, p8, p9, p12):
+                    return True
+
+        return False
+
 
 

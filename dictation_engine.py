@@ -3,6 +3,9 @@ Local Voice Dictation Engine using faster-whisper on Apple Silicon.
 Provides low-latency push-to-talk speech recognition and automatic clipboard injection via Cmd+V.
 """
 
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="faster_whisper")
+
 import threading
 import numpy as np
 import sounddevice as sd
@@ -44,6 +47,7 @@ class VoiceDictationEngine:
             )
             self.stream.start()
         except Exception as e:
+            print(f"[DICTATION] Audio recording start error: {e}")
             with self.lock:
                 self.is_recording = False
 
@@ -71,30 +75,34 @@ class VoiceDictationEngine:
         ).start()
 
     def _process_transcription(self, frames, on_complete_callback, inject_clipboard: bool = True):
-        if not frames:
-            if on_complete_callback:
-                on_complete_callback("")
-            return
-
-        audio_data = np.concatenate(frames, axis=0).flatten()
-        # Ignore accidental taps shorter than 0.35 seconds
-        if len(audio_data) < self.sample_rate * 0.35:
-            if on_complete_callback:
-                on_complete_callback("")
-            return
-
+        text = ""
         try:
+            if not frames:
+                return
+
+            audio_data = np.concatenate(frames, axis=0).flatten()
+            # Ignore accidental taps shorter than 0.35 seconds
+            if len(audio_data) < self.sample_rate * 0.35:
+                return
+
+            # Check for pure silence
+            max_amp = float(np.max(np.abs(audio_data)))
+            if max_amp < 0.008:
+                return
+
             segments, _ = self.model.transcribe(audio_data, beam_size=2, language="en")
             text = " ".join([seg.text for seg in segments]).strip()
-        except Exception:
-            text = ""
 
-        if text and inject_clipboard:
-            self._inject_text(text)
-
-        if on_complete_callback:
-            on_complete_callback(text)
-
+            if text and inject_clipboard:
+                self._inject_text(text)
+        except Exception as e:
+            print(f"[DICTATION ERROR] Transcription failed: {e}")
+        finally:
+            if on_complete_callback:
+                try:
+                    on_complete_callback(text)
+                except Exception as cb_err:
+                    print(f"[DICTATION ERROR] Callback error: {cb_err}")
 
     def _inject_text(self, text: str):
         """Injects text into active search bar / text field via clipboard paste."""

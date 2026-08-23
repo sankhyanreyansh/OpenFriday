@@ -419,7 +419,7 @@ class VisionEngine(QThread):
         prev_time = time.time()
         fps_smoothing = 0.0
 
-        with landmarker:
+        try:
             while self.running:
                 frame = self.grabber.get_latest_frame()
                 if frame is None:
@@ -465,27 +465,24 @@ class VisionEngine(QThread):
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
 
-                        # Abort Gesture: Dual Open Palms
-                        if right_hand_landmarks is not None and left_hand_landmarks is not None:
-                            is_r_open = self.gesture_recognizer._is_hand_fully_open(right_hand_landmarks)
-                            is_l_open = self.gesture_recognizer._is_hand_fully_open(left_hand_landmarks)
-                            if is_r_open and is_l_open:
-                                print("[VISION] Abort gesture (Dual Open Palms) detected during computer control!")
-                                self.ai_assistant.abort_computer_agent()
-                                gesture_data = GestureData(
-                                    is_tracking=True,
-                                    fps=fps_smoothing,
-                                    status_message="● Aborting Desktop Control...",
-                                    is_modifier_active=True,
-                                )
-                                self.gesture_updated.emit(gesture_data)
-                                self.fps_updated.emit(fps_smoothing)
-                                continue
+                        # Abort Gesture: Crossed Hands, Wrists, or Fingers ('X' Shape)
+                        if self.gesture_recognizer.is_crossed_abort_gesture(right_hand_landmarks, left_hand_landmarks):
+                            print("[VISION] Abort gesture (Crossed Hands / 'X' Shape) detected during computer control!")
+                            self.ai_assistant.abort_computer_agent()
+                            gesture_data = GestureData(
+                                is_tracking=True,
+                                fps=fps_smoothing,
+                                status_message="● Aborting Desktop Control...",
+                                is_modifier_active=True,
+                            )
+                            self.gesture_updated.emit(gesture_data)
+                            self.fps_updated.emit(fps_smoothing)
+                            continue
 
                         gesture_data = GestureData(
                             is_tracking=(right_hand_landmarks is not None or left_hand_landmarks is not None),
                             fps=fps_smoothing,
-                            status_message="● CONTROLLING DESKTOP (Flash palms to abort)",
+                            status_message="● CONTROLLING DESKTOP (Cross hands to abort)",
                             is_modifier_active=False,
                         )
                         self.gesture_updated.emit(gesture_data)
@@ -641,14 +638,25 @@ class VisionEngine(QThread):
                 self.gesture_updated.emit(gesture_data)
                 self.fps_updated.emit(fps_smoothing)
 
+        except Exception as run_err:
+            print(f"[VISION ENGINE ERROR] Run loop exception: {run_err}")
+        finally:
+            try:
+                landmarker.close()
+            except Exception:
+                pass
 
-        if self.is_dictating:
-            self.is_dictating = False
-            self.dictation_engine.stop_and_transcribe()
+            if self.is_dictating:
+                self.is_dictating = False
+                try:
+                    self.dictation_engine.stop_and_transcribe()
+                except Exception:
+                    pass
 
-        self.grabber.stop()
-        self.mouse_controller.release_all()
-        self.status_changed.emit("Tracking Stopped")
+            if hasattr(self, 'grabber') and self.grabber:
+                self.grabber.stop()
+            self.mouse_controller.release_all()
+            self.status_changed.emit("Tracking Stopped")
 
     def _handle_mouse_events(
         self,

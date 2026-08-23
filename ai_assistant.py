@@ -1,18 +1,24 @@
 """
-Dual-Tier AI Assistant Engine for FRIDAY with native macOS Computer Use GUI Automation.
-Primary: OpenAI API (gpt-4o for GUI perception-action agent loop, gpt-4o-mini for conversation & tools).
-Fallback: Local Ollama (qwen2.5vl:3b for offline and network resilience).
-GUI Automation: Native macOS Quartz CoreGraphics, AppleScript, and in-memory screenshots.
-Local Speech: Native macOS say Text-to-Speech synthesis.
+Dual-Tier AI Assistant Engine for Open FRIDAY.
+Primary: OpenAI API (gpt-4o-mini for fast routing/chat, gpt-5.4 for visual perception, annotations & computer control).
+Fallback: Local Ollama (qwen2.5vl:3b for offline resilience).
+Features:
+- Unambiguous Intent Routing (Visual AR Annotation vs. Desktop Computer Use).
+- Set-of-Marks (SoM) Accessibility Grounding for 100% click accuracy.
+- Semantic Vector RAG via FastEmbed MemoryVault.
+- Step-by-Step Action Verification and Consecutive Action Stall Detection (3x repeat prevention).
+- Robust Tool Argument Parsing & Large Token Budgets (2500 tokens) for smooth code typing.
+- Local speech synthesis with lifecycle tracking.
 """
 
 import os
 import json
+import re
 import base64
 import subprocess
 import threading
 import time
-from typing import Optional, Callable, Dict, Any, List
+from typing import Optional, Callable, Dict, Any, List, Tuple
 
 from PyQt6.QtCore import QObject, pyqtSignal
 from dotenv import load_dotenv
@@ -28,98 +34,142 @@ from memory_vault import MemoryVault
 load_dotenv()
 
 
+def _safe_parse_tool_arguments(raw_args: str) -> Dict[str, Any]:
+    """
+    Robust JSON parser for OpenAI tool call arguments.
+    Gracefully handles multiline strings, unescaped newlines/quotes in code, and truncated token streams.
+    """
+    if not raw_args or not raw_args.strip():
+        return {}
+
+    # 1. Standard JSON Parse
+    try:
+        return json.loads(raw_args)
+    except Exception:
+        pass
+
+    # 2. Fix unescaped raw newlines / carriage returns
+    try:
+        fixed = raw_args.replace("\n", "\\n").replace("\r", "\\r")
+        return json.loads(fixed)
+    except Exception:
+        pass
+
+    # 3. Regex-based resilient extraction
+    result: Dict[str, Any] = {}
+
+    # Extract observation_and_verification
+    obs_match = re.search(r'"observation_and_verification"\s*:\s*"([^"]*)', raw_args)
+    if obs_match:
+        result["observation_and_verification"] = obs_match.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+    # Extract text / code / content
+    text_match = re.search(r'"(?:text|code|content|value|string)"\s*:\s*"([\s\S]*)', raw_args)
+    if text_match:
+        val = text_match.group(1)
+        if val.endswith('"}'):
+            val = val[:-2]
+        elif val.endswith('"'):
+            val = val[:-1]
+        val = re.split(r'",\s*"', val)[0]
+        result["text"] = val.replace("\\n", "\n").replace('\\"', '"')
+
+    # Extract numeric fields
+    for field in ["element_id", "x", "y", "delta_y", "radius"]:
+        num_match = re.search(rf'"{field}"\s*:\s*(\d+)', raw_args)
+        if num_match:
+            result[field] = int(num_match.group(1))
+
+    # Extract string fields
+    for field in ["combo", "url", "app_name", "summary", "button", "key", "goal"]:
+        str_match = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_args)
+        if str_match:
+            result[field] = str_match.group(1)
+
+    # Extract boolean fields
+    for field in ["press_enter", "double_click"]:
+        bool_match = re.search(rf'"{field}"\s*:\s*(true|false)', raw_args, re.IGNORECASE)
+        if bool_match:
+            result[field] = bool_match.group(1).lower() == "true"
+
+    return result
+
+
 class AIAssistantSignals(QObject):
     annotations_ready = pyqtSignal(list, str)  # (annotations, spoken_response)
+    speaking_started = pyqtSignal()
+    speaking_finished = pyqtSignal()
 
-# Complete tool definitions for OpenAI function calling
-COMPUTER_USE_TOOLS = [
+
+# Conversation-Level Tools (Dispatched during standard queries & routing)
+CONVERSATION_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "computer_click",
-            "description": "Click or double-click the mouse at normalized coordinates (x, y) on a 0-1000 grid",
+            "name": "annotate_screen",
+            "strict": True,
+            "description": "Highlight and explain visual components, diagrams, circuits, code lines, or UI features across the screen with glowing bounding boxes and floating cards. Use whenever the user asks to explain, point out, find, or highlight something on their screen.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "x": {
-                        "type": "integer",
-                        "description": "Horizontal coordinate on a 0-1000 normalized grid (0 = left edge, 1000 = right edge)",
-                    },
-                    "y": {
-                        "type": "integer",
-                        "description": "Vertical coordinate on a 0-1000 normalized grid (0 = top edge, 1000 = bottom edge)",
-                    },
-                    "button": {
+                    "spoken_response": {
                         "type": "string",
-                        "enum": ["left", "right"],
-                        "description": "Mouse button to click (default: left)",
+                        "description": "Brief 1-2 sentence spoken summary for voice output.",
                     },
-                    "double_click": {
-                        "type": "boolean",
-                        "description": "Whether to perform a double click (default: false)",
-                    },
-                },
-                "required": ["x", "y"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "computer_type",
-            "description": "Type text into the currently focused window or field via native clipboard paste injection",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "The exact string of text to type or paste"},
-                    "press_enter": {
-                        "type": "boolean",
-                        "description": "Whether to press the Return/Enter key immediately after typing (default: false)",
-                    },
-                },
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "computer_key",
-            "description": "Press a special keyboard key or keyboard shortcut combination",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key": {
-                        "type": "string",
-                        "enum": ["enter", "escape", "tab", "space", "backspace", "up", "down", "left", "right"],
-                        "description": "The key name to press",
-                    },
-                    "modifiers": {
+                    "annotations": {
                         "type": "array",
-                        "items": {"type": "string", "enum": ["command", "shift", "control", "option"]},
-                        "description": "Modifier keys to hold down (e.g. ['command'] for Cmd+Key)",
+                        "description": "List of 1 to 6 distinct visual bounding boxes with short explanations.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "box_2d": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "[ymin, xmin, ymax, xmax] on a 0-1000 normalized grid tightly enclosing the target visual component.",
+                                },
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short heading (e.g. 'Input Layer', 'Logic Gate', 'Search Bar', 'Bug Location').",
+                                },
+                                "text": {
+                                    "type": "string",
+                                    "description": "1 clear sentence explaining this component.",
+                                },
+                                "color": {
+                                    "type": "string",
+                                    "description": "Hex color (e.g. '#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#a855f7').",
+                                },
+                            },
+                            "required": ["box_2d", "label", "text", "color"],
+                            "additionalProperties": False,
+                        },
                     },
                 },
-                "required": ["key"],
+                "required": ["spoken_response", "annotations"],
+                "additionalProperties": False,
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "computer_scroll",
-            "description": "Scroll the active window or view vertically",
+            "name": "start_computer_automation",
+            "description": "Trigger this ONLY when the user asks you to actively click, type, automate software, search websites, or perform multi-step desktop tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "delta_y": {
-                        "type": "integer",
-                        "description": "Scroll amount (positive = scroll up, negative = scroll down)",
+                    "goal": {
+                        "type": "string",
+                        "description": "The exact multi-step task goal to achieve on the desktop."
+                    },
+                    "initial_action_plan": {
+                        "type": "string",
+                        "description": "Short explanation of the steps you plan to take."
                     }
                 },
-                "required": ["delta_y"],
-            },
-        },
+                "required": ["goal"]
+            }
+        }
     },
     {
         "type": "function",
@@ -152,76 +202,8 @@ COMPUTER_USE_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "annotate_screen",
-            "strict": True,
-            "description": "Draw colored visual bounding boxes and auto-positioned explanation cards across the user's screen. Use when the user asks to explain diagrams, circuits, code, or locate UI elements.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "spoken_response": {
-                        "type": "string",
-                        "description": "Brief 1-2 sentence spoken explanation for TTS audio.",
-                    },
-                    "annotations": {
-                        "type": "array",
-                        "description": "List of 1 to 5 distinct visual bounding boxes with explanations. Must contain at least 1 annotation.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "box_2d": {
-                                    "type": "array",
-                                    "items": {"type": "integer"},
-                                    "description": "[ymin, xmin, ymax, xmax] on a 0-1000 normalized grid tightly enclosing the target visual component.",
-                                },
-                                "label": {
-                                    "type": "string",
-                                    "description": "Short heading (e.g. 'Inputs', 'Logic Gate', 'Attention Layer').",
-                                },
-                                "text": {
-                                    "type": "string",
-                                    "description": "1 clear sentence explaining this specific component.",
-                                },
-                                "color": {
-                                    "type": "string",
-                                    "description": "Hex color code (e.g., '#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#a855f7').",
-                                },
-                            },
-                            "required": ["box_2d", "label", "text", "color"],
-                            "additionalProperties": False,
-                        },
-                    },
-                },
-                "required": ["spoken_response", "annotations"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "start_computer_automation",
-            "description": "Trigger this when the user asks to write code, edit text, type, click, or perform multi-step actions on their screen.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "goal": {
-                        "type": "string",
-                        "description": "The exact multi-step task goal to achieve on the user's desktop."
-                    },
-                    "initial_action_plan": {
-                        "type": "string",
-                        "description": "Short explanation of the steps you plan to take."
-                    }
-                },
-                "required": ["goal"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "save_user_memory",
-            "description": "Save important user facts, personal preferences, project details, or explicit notes into the local markdown memory vault for long-term recall.",
+            "description": "Save important user facts, personal preferences, project details, or explicit notes into the local semantic memory vault for long-term recall.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -232,12 +214,268 @@ COMPUTER_USE_TOOLS = [
                     },
                     "fact_or_preference": {
                         "type": "string",
-                        "description": "Concise, factual statement to remember (e.g. 'User prefers dark mode', 'User sister birthday is June 4')."
+                        "description": "Concise, factual statement to remember (e.g. 'User prefers dark mode', 'Sister birthday is June 4')."
                     }
                 },
                 "required": ["category_file", "fact_or_preference"]
             }
         }
+    },
+]
+
+# Action Tools available strictly INSIDE the autonomous Computer Agent Loop
+# Each action requires mandatory visual observation and verification
+COMPUTER_ACTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "click_element",
+            "description": "Click or double-click an interactive UI element by its discrete Set-of-Marks integer ID badge (e.g. [1], [2], [3]) with 100% precision. ALWAYS PREFER this over computer_click when an ID tag is visible.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing what visual changes occurred after previous action, whether it succeeded, and why this click is needed.",
+                    },
+                    "element_id": {
+                        "type": "integer",
+                        "description": "The exact Set-of-Marks numeric ID visible on the element badge in the screenshot (e.g. 1, 2, 5)",
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Mouse button to click (default: left)",
+                    },
+                    "double_click": {
+                        "type": "boolean",
+                        "description": "Whether to perform a double click (default: false)",
+                    },
+                },
+                "required": ["element_id", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_click",
+            "description": "Click or double-click the mouse at normalized coordinates (x, y) on a 0-1000 grid. Use as fallback for unlabeled canvas elements, video players, or custom widgets.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing what visual changes occurred after previous action, whether it succeeded, and why this coordinate click is needed.",
+                    },
+                    "x": {
+                        "type": "integer",
+                        "description": "Horizontal coordinate on a 0-1000 normalized grid (0 = left edge, 1000 = right edge)",
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Vertical coordinate on a 0-1000 normalized grid (0 = top edge, 1000 = bottom edge)",
+                    },
+                    "button": {
+                        "type": "string",
+                        "enum": ["left", "right"],
+                        "description": "Mouse button to click (default: left)",
+                    },
+                    "double_click": {
+                        "type": "boolean",
+                        "description": "Whether to perform a double click (default: false)",
+                    },
+                },
+                "required": ["x", "y", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_hover",
+            "description": "Hover mouse cursor over normalized (x, y) coordinates to reveal tooltips or flyout menus",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing what visual changes occurred and why hovering here is needed.",
+                    },
+                    "x": {"type": "integer", "description": "Horizontal coordinate on 0-1000 normalized grid"},
+                    "y": {"type": "integer", "description": "Vertical coordinate on 0-1000 normalized grid"},
+                },
+                "required": ["x", "y", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_drag",
+            "description": "Drag the mouse smoothly from (start_x, start_y) to (end_x, end_y) on a 0-1000 normalized grid",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing visual state and reason for dragging.",
+                    },
+                    "start_x": {"type": "integer", "description": "Starting X (0-1000)"},
+                    "start_y": {"type": "integer", "description": "Starting Y (0-1000)"},
+                    "end_x": {"type": "integer", "description": "Ending X (0-1000)"},
+                    "end_y": {"type": "integer", "description": "Ending Y (0-1000)"},
+                },
+                "required": ["start_x", "start_y", "end_x", "end_y", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_type",
+            "description": "Type or paste text/code into the currently focused window, text field, or notebook cell via fast clipboard injection (preserves user's prior clipboard history).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences verifying that the target text box/cell is focused and explaining what will be typed.",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "The exact string, text, or multi-line code to type or paste.",
+                    },
+                    "press_enter": {
+                        "type": "boolean",
+                        "description": "Whether to press Return/Enter immediately after typing (default: false)",
+                    },
+                },
+                "required": ["text", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_hotkey",
+            "description": "Press a macOS keyboard shortcut combination (e.g. 'cmd+t', 'cmd+w', 'cmd+shift+p', 'cmd+k', 'ctrl+c', 'option+tab', 'cmd+space')",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing current visual state and why this keyboard shortcut is needed.",
+                    },
+                    "combo": {"type": "string", "description": "The hotkey string (e.g. 'cmd+t', 'cmd+shift+p', 'cmd+k')"},
+                },
+                "required": ["combo", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_key",
+            "description": "Press a special keyboard key (e.g. 'enter', 'escape', 'tab', 'space', 'backspace', 'up', 'down', 'left', 'right')",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing visual state and why pressing this key is needed.",
+                    },
+                    "key": {
+                        "type": "string",
+                        "enum": ["enter", "escape", "tab", "space", "backspace", "up", "down", "left", "right"],
+                        "description": "The key name to press",
+                    },
+                    "modifiers": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["command", "shift", "control", "option"]},
+                        "description": "Modifier keys to hold down (e.g. ['command'] for Cmd+Key)",
+                    },
+                },
+                "required": ["key", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer_scroll",
+            "description": "Scroll the active window or view vertically",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing visual state and reason for scrolling.",
+                    },
+                    "delta_y": {
+                        "type": "integer",
+                        "description": "Scroll amount (positive = scroll up, negative = scroll down)",
+                    }
+                },
+                "required": ["delta_y", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_region",
+            "description": "Foveated High-Resolution Perception: inspect an uncompressed 1:1 pixel zoomed crop around (x, y) to read small text, code lines, or tiny buttons",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences explaining what region needs high-resolution visual inspection.",
+                    },
+                    "x": {"type": "integer", "description": "Center X on 0-1000 normalized grid"},
+                    "y": {"type": "integer", "description": "Center Y on 0-1000 normalized grid"},
+                    "radius": {"type": "integer", "description": "Crop radius in logical points (default: 150)"},
+                },
+                "required": ["x", "y", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_website",
+            "description": "Open a website URL in the user's default web browser",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing reason for opening URL.",
+                    },
+                    "url": {"type": "string", "description": "The full web address URL (e.g. https://www.google.com)"},
+                },
+                "required": ["url", "observation_and_verification"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_application",
+            "description": "Launch or activate a macOS application by name",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing reason for launching app.",
+                    },
+                    "app_name": {"type": "string", "description": "The macOS application name (e.g. Safari, Notes, Terminal, Spotify)"},
+                },
+                "required": ["app_name", "observation_and_verification"],
+            },
+        },
     },
     {
         "type": "function",
@@ -247,22 +485,27 @@ COMPUTER_USE_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences verifying that the goal was fully achieved based on the final screenshot.",
+                    },
                     "summary": {"type": "string", "description": "1 concise sentence summarizing what was accomplished on the computer"},
                 },
-                "required": ["summary"],
+                "required": ["summary", "observation_and_verification"],
             },
         },
     },
 ]
 
-# Alias for standard conversation tool subset
-OPENAI_TOOLS = COMPUTER_USE_TOOLS
+# Compatibility aliases
+COMPUTER_USE_TOOLS = CONVERSATION_TOOLS
+OPENAI_TOOLS = CONVERSATION_TOOLS
 
 
 class AIAssistant:
     """
     Dual-Tier AI Desktop Assistant for Open FRIDAY:
-    1. Primary Tier: OpenAI API (gpt-4o-mini for general chat/router, gpt-5.4 for vision/computer use).
+    1. Primary Tier: OpenAI API (gpt-4o-mini for general chat/router, gpt-5.4/gpt-4o for vision/computer use).
     2. Fallback Tier: Local Ollama (strictly qwen2.5vl:3b) when offline or API is unavailable.
     """
 
@@ -275,14 +518,13 @@ class AIAssistant:
         self.primary_model = primary_model
         self.computer_use_model = computer_use_model
         self.agent_model = computer_use_model
-        # Strictly use qwen2.5vl:3b for offline fallback
         self.fallback_model = "qwen2.5vl:3b"
         self.fallback_host = fallback_host
 
-        # Computer GUI controller
+        # Computer GUI controller with Set-of-Marks grounding
         self.controller = MacComputerController()
 
-        # Long-Term Markdown Memory Vault
+        # Semantic Vector RAG Memory Vault
         self.memory_vault = MemoryVault()
 
         # In-Session Rolling Conversation History
@@ -309,44 +551,36 @@ class AIAssistant:
         self.system_instruction = (
             "You are Open FRIDAY, an open-source autonomous desktop AI assistant. When speaking conversationally with the user, you may refer to yourself simply as Friday.\n\n"
             f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
-            "VISUAL COORDINATE REFERENCE:\n"
-            "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes.\n"
-            "- Vertical grid lines mark X coordinates: 100, 200, 300, ..., 900.\n"
-            "- Horizontal grid lines mark Y coordinates: 100, 200, 300, ..., 900.\n"
-            "- Inspect these labeled grid lines to accurately locate targets and emit precise [ymin, xmin, ymax, xmax] bounding boxes or click coordinates.\n\n"
-            "VISUAL ANNOTATION GUIDELINES:\n"
-            "1. BOUNDING BOX ACCURACY:\n"
-            "   - Use the reference coordinate grid lines (0 to 1000) on the screenshot to pinpoint the exact boundaries of components.\n"
-            "   - `box_2d` must be [ymin, xmin, ymax, xmax] tightly enclosing the specific visual element without capturing excess background.\n"
-            "   - Avoid creating overlapping or nested bounding boxes unless one component is strictly a sub-element of another.\n"
-            "   - Emit between 1 and 5 focused, distinct annotations. Even a single well-placed annotation is sufficient if there is only one relevant element on screen.\n"
-            "2. CARD LABELS & TEXT:\n"
-            "   - Keep `label` short (1-3 words).\n"
-            "   - Keep `text` concise and direct (1 clear sentence).\n"
-            "   - Use distinct contrasting colors for different functional groups (e.g. green '#22c55e' for inputs, blue '#3b82f6' for logic/processing, red '#ef4444' for outputs/critical blocks).\n\n"
-            "DECISION GUIDELINES:\n"
-            "1. DESKTOP INTERACTION VS. DIRECT ANSWER:\n"
-            "   - If the user asks for code, writing, editing, typing, clicking, or actions relative to something on their screen (e.g., 'write this code below the hello world statement in my editor', 'clear the text in this compiler', 'click on cell B3', 'reply to this message', 'open app and do X'):\n"
-            "     -> You MUST call `start_computer_automation` to inspect the screen and execute the typing/clicks directly into their app.\n"
+            "CRITICAL INTENT DISAMBIGUATION RULES:\n"
+            "1. ON-SCREEN VISUAL EXPLANATION & ANNOTATION:\n"
+            "   - When the user asks to explain, describe, point out, locate, highlight, or break down visual elements, diagrams, code, circuits, or UI features on their screen:\n"
+            "     -> You MUST call `annotate_screen` with bounding boxes [ymin, xmin, ymax, xmax] (0-1000 grid), short label, concise explanation, and color.\n"
+            "     -> Provide a 1-2 sentence spoken summary in `spoken_response`.\n"
+            "     -> NEVER call computer automation tools (click, type) for visual explanation/annotation requests.\n\n"
+            "2. DESKTOP GUI AUTOMATION:\n"
+            "   - When the user explicitly asks you to click, type, write code in their editor, open new tabs, control applications, search websites, or perform multi-step computer actions:\n"
+            "     -> Call `start_computer_automation` to execute the actions autonomously.\n\n"
+            "3. PERSONAL MEMORY RECALL & STORAGE:\n"
             "   - If the user asks you to remember, save, or store a personal fact, preference, note, or project detail:\n"
-            "     -> Call `save_user_memory` with appropriate category_file and fact_or_preference.\n"
-            "   - If the user asks a purely theoretical question, general knowledge, translation, or conversational query with no screen interaction:\n"
+            "     -> Call `save_user_memory`.\n\n"
+            "4. CONVERSATION & GENERAL KNOWLEDGE:\n"
+            "   - If the user asks a theoretical question, math, or conversational query with no screen interaction:\n"
             "     -> Answer directly in 1-2 concise sentences for spoken audio.\n"
-            "   - If the user asks to visually explain a diagram, architecture, circuit, or find/highlight items on screen:\n"
-            "     -> Call `annotate_screen`.\n\n"
-            "2. COMPUTER USE AUTONOMY:\n"
-            "   - Always verify each action in the following screenshot.\n"
-            "   - Execute tasks with complete autonomy from start to finish. Once the goal is completed, call `finish_task`.\n\n"
-            "3. Spoken Audio: Respond naturally and concisely in 1 to 2 sentences suitable for spoken audio. Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
+            "   - Spoken Audio: Respond naturally and concisely in 1 to 2 sentences suitable for spoken audio. Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
         )
 
         self.available_tools = {
-            "open_website": open_website,
-            "open_application": open_application,
+            "click_element": self.controller.click_element,
             "computer_click": self.controller.click,
+            "computer_hover": self.controller.hover,
+            "computer_drag": self.controller.drag,
             "computer_type": self.controller.type_text,
             "computer_key": self.controller.key_press,
+            "computer_hotkey": self.controller.hotkey,
             "computer_scroll": self.controller.scroll,
+            "inspect_region": self._handle_inspect_region,
+            "open_website": open_website,
+            "open_application": open_application,
             "save_user_memory": lambda category_file, fact_or_preference: self.memory_vault.save_memory(category_file, fact_or_preference),
         }
         self.tools = [open_website, open_application]
@@ -359,6 +593,11 @@ class AIAssistant:
         # Concurrency & busy state locking
         self.is_busy: bool = False
         self.busy_lock = threading.Lock()
+
+    def _handle_inspect_region(self, x: int, y: int, radius: int = 150) -> str:
+        """Handles foveated high-resolution inspection requests."""
+        b64_crop, cw, ch = self.controller.inspect_region(x, y, radius)
+        return f"Acquired 1:1 high-resolution zoomed crop ({cw}x{ch} px) centered at norm ({x}, {y})."
 
     def clear_history(self):
         """Clears in-session rolling conversation history."""
@@ -387,26 +626,35 @@ class AIAssistant:
             except Exception as e:
                 print(f"[WARN] Error in context changed callback: {e}")
 
-    def _is_visual_query(self, prompt: str) -> bool:
-        """Determines if a prompt implies inspecting or explaining visual elements on the desktop."""
+    def _is_visual_annotation_query(self, prompt: str) -> bool:
+        """Determines if a prompt is asking to explain, point out, annotate, or inspect screen content."""
         keywords = [
             "screen", "diagram", "circuit", "ui", "look at", "what is this", "what's this",
-            "explain this", "where is", "find", "highlight", "annotate", "code", "window",
-            "display", "image", "chart", "table", "button", "icon", "read this", "summarize this",
-            "what am i looking at", "on my screen", "what do you see", "show me", "point to"
+            "explain this", "where is", "find", "highlight", "annotate", "code on screen",
+            "what am i looking at", "on my screen", "what do you see", "show me", "point to",
+            "break down", "error on screen", "bug in this", "what does this mean", "describe this"
+        ]
+        p_lower = prompt.lower()
+        return any(k in p_lower for k in keywords)
+
+    def _is_computer_control_task(self, prompt: str) -> bool:
+        """Determines if a prompt requires autonomous desktop automation (clicking, typing, opening)."""
+        if self._is_visual_annotation_query(prompt) and not any(a in prompt.lower() for a in ["type in", "write in", "click on", "fill out", "write code", "paste code"]):
+            return False
+
+        keywords = [
+            "click", "double click", "press", "type in", "type into", "write in", "write the code", "write code",
+            "search on google", "search google for", "search youtube for", "play on spotify",
+            "pause music", "control desktop", "scroll down", "scroll up", "fill out",
+            "navigate to", "open notes and", "close window", "take a note", "go to",
+            "compose", "in the search bar", "search bar", "in the subject", "in the content",
+            "first link", "second link", "hit enter", "drag", "hover", "paste", "insert into"
         ]
         p_lower = prompt.lower()
         return any(k in p_lower for k in keywords)
 
     def classify_query(self, user_query: str) -> Dict[str, Any]:
-        """
-        Fast pre-flight query router using gpt-4o-mini structured JSON (with local heuristic fallback):
-        - target_model: 'gpt-4o-mini' or 'gpt-5.4'
-        - requires_screen_context: bool (True only if query inspects on-screen diagrams, code, UI, or windows)
-        - is_computer_use: bool (True if physical GUI action requested)
-        - requires_memory_retrieval: bool (True if referencing user facts/preferences)
-        - memory_search_query: str (Search terms for MemoryVault RAG)
-        """
+        """Fast pre-flight query router with unambiguous visual annotation vs. computer control separation."""
         if not user_query or not user_query.strip():
             return {
                 "target_model": self.primary_model,
@@ -416,7 +664,6 @@ class AIAssistant:
                 "memory_search_query": "",
             }
 
-        # Attempt fast gpt-4o-mini structured triage call if online
         if self.openai_client is not None:
             try:
                 router_messages = [
@@ -425,11 +672,11 @@ class AIAssistant:
                         "content": (
                             "You are a fast, low-latency triage router for Open FRIDAY, an AI desktop assistant. "
                             "Analyze the user's utterance and return a JSON object with:\n"
-                            "- \"target_model\": \"gpt-4o-mini\" (for conversation, facts, math, basic questions, memory recall, fast tool calling) or \"gpt-5.4\" (for deep visual inspection of diagrams/circuits, code on screen, complex UI annotation).\n"
-                            "- \"requires_screen_context\": boolean. Set to TRUE ONLY if the user is asking about visual content currently visible on their screen (e.g. 'what is on my screen', 'explain this diagram', 'read the text in this window', 'where is the button'). Set to FALSE for math (e.g. 'what is 7+7'), general knowledge, conversations, memory queries, or questions with no visual reference.\n"
-                            "- \"is_computer_use\": boolean. Set to TRUE if the user asks you to physically click, type, automate an application, search Google/YouTube, or control their desktop.\n"
-                            "- \"requires_memory_retrieval\": boolean. Set to TRUE if the user asks about their personal info, preferences, past saved notes, or asks you to remember something.\n"
-                            "- \"memory_search_query\": string. Concise keywords for memory lookup (or empty string if not needed)."
+                            "- \"target_model\": \"gpt-4o-mini\" or \"gpt-5.4\"\n"
+                            "- \"requires_screen_context\": boolean. Set to TRUE whenever the user asks to explain, point out, highlight, locate, inspect, or understand visual content on their screen.\n"
+                            "- \"is_computer_use\": boolean. Set to TRUE ONLY if the user asks you to actively click, type, write code on their desktop, automate software, open new tabs/apps, or control their computer.\n"
+                            "- \"requires_memory_retrieval\": boolean. Set to TRUE if the user asks about past context, preferences, or notes.\n"
+                            "- \"memory_search_query\": string. Search keywords for MemoryVault."
                         )
                     },
                     {"role": "user", "content": user_query}
@@ -445,25 +692,35 @@ class AIAssistant:
                 target_model = result.get("target_model", self.primary_model)
                 if target_model not in ("gpt-4o-mini", "gpt-5.4"):
                     target_model = self.primary_model
+
+                req_screen = bool(result.get("requires_screen_context", False))
+                is_comp = bool(result.get("is_computer_use", False))
+
+                # Hard guardrail: If screen explanation/annotation was requested, disable computer use
+                if req_screen and not any(k in user_query.lower() for k in ["click", "type", "write", "open app", "automate", "paste", "insert"]):
+                    is_comp = False
+
                 return {
                     "target_model": target_model,
-                    "requires_screen_context": bool(result.get("requires_screen_context", False)),
-                    "is_computer_use": bool(result.get("is_computer_use", False)),
+                    "requires_screen_context": req_screen,
+                    "is_computer_use": is_comp,
                     "requires_memory_retrieval": bool(result.get("requires_memory_retrieval", False)),
                     "memory_search_query": str(result.get("memory_search_query", "")),
                 }
             except Exception as e:
                 print(f"[AI ROUTER WARN] gpt-4o-mini router call failed ({e}), using heuristic fallback.")
 
-        # Local Heuristic Fallback
+        is_visual = self._is_visual_annotation_query(user_query)
         is_computer = self._is_computer_control_task(user_query)
-        is_visual = self._is_visual_query(user_query)
+        if is_visual and not any(k in user_query.lower() for k in ["write", "type", "click"]):
+            is_computer = False
+
         is_memory = any(k in user_query.lower() for k in [
             "name", "birthday", "prefer", "favorite", "remember", "saved",
             "who am i", "who i am", "what do you know", "notes", "profile", "sister", "brother"
         ])
         return {
-            "target_model": self.computer_use_model if is_visual else self.primary_model,
+            "target_model": self.computer_use_model if (is_visual or is_computer) else self.primary_model,
             "requires_screen_context": is_visual,
             "is_computer_use": is_computer,
             "requires_memory_retrieval": is_memory,
@@ -478,7 +735,7 @@ class AIAssistant:
         on_reply_generated: Optional[Callable[[str], None]] = None,
         on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
-        """Sends prompt (with selective screen context) in a background thread and speaks the response."""
+        """Sends prompt in background thread and speaks response."""
         if not prompt or not prompt.strip():
             return
 
@@ -490,7 +747,6 @@ class AIAssistant:
 
         effective_image = image_bytes if image_bytes is not None else self.context_image_bytes
 
-        # One-time context consumption: clear staged context image immediately upon staging
         if self.context_image_bytes is not None:
             self.clear_context_image()
 
@@ -499,19 +755,6 @@ class AIAssistant:
             args=(prompt.strip(), effective_image, on_status_change, on_reply_generated, on_annotations_generated),
             daemon=True,
         ).start()
-
-    def _is_computer_control_task(self, prompt: str) -> bool:
-        """Determines if a prompt requires autonomous perception-action computer use."""
-        keywords = [
-            "click", "double click", "press", "type in", "type into", "write in",
-            "search on google", "search google for", "search youtube for", "play on spotify",
-            "pause music", "control desktop", "scroll down", "scroll up", "fill out",
-            "navigate to", "open notes and", "close window", "take a note", "go to",
-            "compose", "in the search bar", "search bar", "in the subject", "in the content",
-            "first link", "second link", "enter", "hit enter"
-        ]
-        p_lower = prompt.lower()
-        return any(k in p_lower for k in keywords)
 
     def _process_query(
         self,
@@ -522,14 +765,13 @@ class AIAssistant:
         on_annotations_generated: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
     ):
         try:
-            # 1. Pre-Flight Intent Classification
             classification = self.classify_query(prompt)
             print(f"[AI ROUTER] Triage: target={classification.get('target_model')}, screen={classification.get('requires_screen_context')}, computer_use={classification.get('is_computer_use')}, memory={classification.get('requires_memory_retrieval')}")
 
-            # 2. Check for Computer Use GUI Automation
+            # 1. Computer Use Desktop Automation Loop
             if classification.get("is_computer_use", False) or self._is_computer_control_task(prompt):
                 if self.openai_client is not None:
-                    summary = self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated)
+                    summary = self._execute_computer_agent_loop(prompt, on_status_change, on_reply_generated, max_iterations=30)
                     self.conversation_history.append({"role": "user", "content": prompt})
                     self.conversation_history.append({"role": "assistant", "content": summary or "Completed desktop task."})
                     if len(self.conversation_history) > self.max_history_turns * 2:
@@ -547,11 +789,11 @@ class AIAssistant:
                     self._speak(fallback_msg)
                     return
 
-            # 3. Selective Screen Capture: Only capture screenshot if needed and not already supplied
+            # 2. Visual Inspection / AR Annotations (Screen capture if needed)
             effective_image = image_bytes
             if effective_image is None and classification.get("requires_screen_context", False):
                 try:
-                    b64_snap, _, _ = self.controller.capture_screen_base64()
+                    b64_snap, _, _, _ = self.controller.capture_screen_base64(apply_grid=True, apply_som=False)
                     effective_image = base64.b64decode(b64_snap)
                     print(f"[AI] Selective Screen Capture: Acquired live full-screen context for '{prompt}'")
                 except Exception as e:
@@ -565,7 +807,6 @@ class AIAssistant:
             if effective_image is not None:
                 target_model = self.computer_use_model
 
-            # 4. Attempt Primary OpenAI API Dispatch
             if self.openai_client is not None:
                 try:
                     reply = self._query_openai(
@@ -581,7 +822,6 @@ class AIAssistant:
                     print(f"[AI] OpenAI unavailable ({e}), falling back to local Qwen 3B...")
                     reply = None
 
-            # 5. Fallback to Local Ollama Engine (Strict Qwen 3B)
             if reply is None:
                 reply = self._query_ollama(prompt, effective_image, classification=classification)
 
@@ -590,7 +830,6 @@ class AIAssistant:
 
             clean_reply = reply.strip()
 
-            # Record in rolling in-session conversation history
             self.conversation_history.append({"role": "user", "content": prompt})
             self.conversation_history.append({"role": "assistant", "content": clean_reply})
             if len(self.conversation_history) > self.max_history_turns * 2:
@@ -640,12 +879,9 @@ class AIAssistant:
         task_prompt: str,
         on_status_change: Optional[Callable[[str], None]] = None,
         on_reply_generated: Optional[Callable[[str], None]] = None,
-        max_iterations: int = 10,
+        max_iterations: int = 30,
     ) -> str:
-        """
-        Public entry point for autonomous Perception-Action loop.
-        Applies concurrency locks if invoked directly outside query().
-        """
+        """Public entry point for autonomous Set-of-Marks Perception-Action loop."""
         with self.busy_lock:
             if self.is_busy:
                 print(f"[AI] Assistant is currently busy. Discarding computer task: '{task_prompt}'")
@@ -667,11 +903,11 @@ class AIAssistant:
         task_prompt: str,
         on_status_change: Optional[Callable[[str], None]] = None,
         on_reply_generated: Optional[Callable[[str], None]] = None,
-        max_iterations: int = 10,
+        max_iterations: int = 30,
     ) -> str:
         """
-        Autonomous Perception-Action loop using gpt-4o vision to control macOS GUI.
-        Perceives screen -> Predicts action -> Executes -> Verifies screenshot outcome -> Repeats until finish_task().
+        Autonomous Set-of-Marks (SoM) Perception-Action loop using COMPUTER_ACTION_TOOLS strictly,
+        with step-by-step verification, resilient JSON parsing, and 3x consecutive identical action stall detection.
         """
         if not self.openai_client:
             fallback_msg = "Computer automation requires an active cloud connection and is unavailable offline."
@@ -688,40 +924,32 @@ class AIAssistant:
         if on_status_change:
             on_status_change("CONTROLLING")
 
-        print(f"\n[COMPUTER AGENT] Starting desktop GUI automation task: '{task_prompt}'")
+        print(f"\n[COMPUTER AGENT] Starting desktop GUI automation task (max {max_iterations} steps): '{task_prompt}'")
         print(f"[COMPUTER AGENT] Display logical resolution: {self.controller.logical_width}x{self.controller.logical_height}")
 
         summary = "Completed desktop task."
+        action_history: List[Tuple[str, str]] = []
 
         try:
-            # Capture initial frame to anchor initial perception
-            b64_init, init_w, init_h = self.controller.capture_screen_base64()
+            # Capture initial frame with Set-of-Marks tags
+            b64_init, init_w, init_h, elements_summary = self.controller.capture_screen_base64(apply_grid=True, apply_som=True)
 
             system_prompt = (
                 f"You are an expert desktop GUI automation agent interacting with a macOS screen of logical resolution {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
-                "COORDINATE SYSTEM & VISUAL REFERENCE:\n"
-                "- Provide all coordinates (x, y) on a normalized 0 to 1000 scale:\n"
-                "  * (0, 0) = Top-Left corner\n"
-                "  * (500, 500) = Exact center of the screen\n"
-                "  * (1000, 1000) = Bottom-Right corner\n"
-                "  * Typical browser search/address bars are located horizontally centered near the top: (500, 75) to (500, 120).\n"
-                "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes:\n"
-                "  * Vertical grid lines mark X coordinates: 100, 200, 300, ..., 900.\n"
-                "  * Horizontal grid lines mark Y coordinates: 100, 200, 300, ..., 900.\n"
-                "- Inspect these labeled grid lines to accurately locate targets and emit precise (x, y) click coordinates or [ymin, xmin, ymax, xmax] bounding boxes.\n\n"
+                "SET-OF-MARKS (SoM) ELEMENT GROUNDING:\n"
+                "- Interactive UI buttons, inputs, tabs, search bars, and links are labeled with numeric ID badges: [1], [2], [3]...\n"
+                "- ALWAYS PREFER calling `click_element(element_id=...)` with the exact badge number for 100% click precision.\n"
+                "- Use `computer_click(x, y)` as a fallback only when clicking on an untagged canvas or video area.\n"
+                "- Use `computer_hotkey(combo='cmd+t')` or `computer_hotkey(combo='cmd+w')` for fast browser/tab control.\n"
+                "- Use `inspect_region(x, y)` if you need a high-resolution zoomed crop of dense code or small text.\n\n"
+                "MANDATORY STEP-BY-STEP VISUAL VERIFICATION:\n"
+                "- In EVERY tool call, you MUST provide the `observation_and_verification` parameter before selecting the action.\n"
+                "- Carefully compare the current screenshot with the previous screenshot. Explicitly state what changed, verify if the previous action succeeded, and explain why the next action is required.\n"
+                "- If an element click or typing action didn't take effect, do not repeat the exact same failed action. Try an alternate approach (e.g. Set-of-Marks ID badge, keyboard shortcut like 'cmd+a' then typing, or inspect_region).\n\n"
                 "COMPUTER USE AGENT INSTRUCTIONS:\n"
-                "1. END-TO-END AUTONOMY: When given a multi-step request (e.g. 'Open Chrome, go to YouTube, and search jazz', or 'type in search bar, press enter, and click first link'):\n"
-                "   - Execute all necessary actions sequentially across iterations.\n"
-                "   - DO NOT stop after step 1 to ask for user confirmation or input.\n"
-                "   - Continue iterating through the perception-action loop until the entire objective is completed.\n"
-                "   - Only call `finish_task` when the final goal is fully achieved and visible on screen.\n\n"
-                "2. MANDATORY VISUAL VERIFICATION:\n"
-                "   - On every iteration (from iteration 2 onwards), first inspect the latest screenshot to verify that your previous action produced the intended UI change.\n"
-                "   - If you clicked a search box, verify that the cursor is active before typing.\n"
-                "   - If you typed text, confirm the text actually appears in the field before pressing Enter.\n"
-                "   - If an action missed or failed, adjust your normalized coordinates and retry immediately.\n\n"
-                "3. Take discrete actions per turn (click, type, or press key) to allow observation on the next iteration.\n"
-                "4. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
+                "1. END-TO-END AUTONOMY: Complete multi-step tasks end-to-end without stopping for confirmation until calling `finish_task`.\n"
+                "2. MANDATORY VISUAL VERIFICATION: Inspect each updated screenshot to confirm your previous action took effect before proceeding.\n"
+                "3. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
             )
 
             init_img_content = {
@@ -731,12 +959,14 @@ class AIAssistant:
                 }
             }
 
+            elements_text = "\n".join([f"  Tag [{e['id']}]: {e['role']} '{e['title']}'" for e in elements_summary[:25]]) if elements_summary else "No accessibility tags detected."
+
             messages: List[Dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": f"Task: {task_prompt}\nInitial screen state:"},
+                        {"type": "text", "text": f"Task: {task_prompt}\nDetected interactive UI element tags:\n{elements_text}\nInitial screen state:"},
                         init_img_content,
                     ]
                 }
@@ -756,9 +986,9 @@ class AIAssistant:
                         response = self.openai_client.chat.completions.create(
                             model=self.computer_use_model,
                             messages=messages,
-                            tools=COMPUTER_USE_TOOLS,
+                            tools=COMPUTER_ACTION_TOOLS,
                             tool_choice="auto",
-                            max_completion_tokens=350,
+                            max_completion_tokens=2500,
                             temperature=0.2,
                         )
                     except Exception as param_err:
@@ -766,9 +996,9 @@ class AIAssistant:
                             response = self.openai_client.chat.completions.create(
                                 model=self.computer_use_model,
                                 messages=messages,
-                                tools=COMPUTER_USE_TOOLS,
+                                tools=COMPUTER_ACTION_TOOLS,
                                 tool_choice="auto",
-                                max_completion_tokens=350,
+                                max_completion_tokens=2500,
                             )
                         else:
                             raise param_err
@@ -788,7 +1018,7 @@ class AIAssistant:
                     text_content = msg.content or ""
                     print(f"[COMPUTER AGENT] Model returned text without tool calls: {text_content}")
                     if iteration < max_iterations - 1:
-                        b64_next, next_w, next_h = self.controller.capture_screen_base64()
+                        b64_next, next_w, next_h, next_elements = self.controller.capture_screen_base64(apply_grid=True, apply_som=True)
                         messages.append({
                             "role": "user",
                             "content": [
@@ -820,10 +1050,22 @@ class AIAssistant:
                         break
 
                     func_name = tool_call.function.name
-                    try:
-                        args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                    except Exception:
-                        args = {}
+                    args = _safe_parse_tool_arguments(tool_call.function.arguments or "")
+
+                    # Extract model's visual verification
+                    verification = args.pop("observation_and_verification", None)
+                    if verification:
+                        print(f"[COMPUTER AGENT VERIFICATION] Step {iteration + 1}: {verification}")
+
+                    # Consecutive Action Stall Detection: Check if same mechanical action repeated 3x
+                    action_sig = (func_name, json.dumps(args, sort_keys=True))
+                    action_history.append(action_sig)
+
+                    if len(action_history) >= 3 and action_history[-1] == action_history[-2] == action_history[-3]:
+                        print(f"[COMPUTER AGENT STALL] Detected 3 consecutive identical actions: {action_sig}. Halting loop.")
+                        summary = f"Unable to complete task: Action '{func_name}' repeated 3 times with no progress."
+                        finished = True
+                        break
 
                     print(f"[COMPUTER AGENT] Executing action: {func_name}({args})")
 
@@ -845,11 +1087,11 @@ class AIAssistant:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
-                        "content": f"{tool_result}. Observe the next screenshot to verify outcome.",
+                        "content": f"{tool_result}. Verify visual outcome in next screenshot.",
                     })
 
-                # Add settling delay so UI animations, focus changes, and popups render before capture
-                time.sleep(0.35)
+                # Perceptual settling check
+                self.controller.wait_for_change(timeout_ms=500)
 
                 if finished or self.abort_event.is_set():
                     if self.abort_event.is_set():
@@ -857,16 +1099,17 @@ class AIAssistant:
                     print(f"[COMPUTER AGENT] Goal achieved / loop ended on iteration {iteration + 1}!")
                     break
 
-                # Capture updated live screenshot for next iteration if loop continues
+                # Capture updated live screenshot with updated Set-of-Marks tags
                 if iteration < max_iterations - 1:
-                    b64_next, next_w, next_h = self.controller.capture_screen_base64()
-                    print(f"[COMPUTER AGENT] Live screenshot updated: {next_w}x{next_h} px")
+                    b64_next, next_w, next_h, next_elements = self.controller.capture_screen_base64(apply_grid=True, apply_som=True)
+                    print(f"[COMPUTER AGENT] Live screenshot updated: {next_w}x{next_h} px ({len(next_elements)} elements tagged)")
+                    next_elements_text = "\n".join([f"  Tag [{e['id']}]: {e['role']} '{e['title']}'" for e in next_elements[:25]]) if next_elements else "No accessibility tags detected."
                     messages.append({
                         "role": "user",
                         "content": [
                             {
                                 "type": "text",
-                                "text": f"[Step {iteration+2}]: Updated live screenshot. Verify outcome of previous action and determine next step.",
+                                "text": f"[Step {iteration+2}]: Updated live screenshot.\nUpdated interactive UI tags:\n{next_elements_text}\nVerify outcome of previous action and determine next step.",
                             },
                             {
                                 "type": "image_url",
@@ -881,7 +1124,6 @@ class AIAssistant:
 
         print(f"[COMPUTER AGENT] Final Summary: {summary}\n")
 
-        # Presentation and speech
         if on_reply_generated:
             try:
                 on_reply_generated(summary)
@@ -897,7 +1139,6 @@ class AIAssistant:
             on_status_change("SPEAKING")
 
         self._speak(summary)
-
         return summary
 
     def _query_openai(
@@ -910,11 +1151,10 @@ class AIAssistant:
         target_model: Optional[str] = None,
         classification: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Dispatches query to OpenAI gpt-4o-mini / gpt-5.4 with selective RAG memory and multimodal vision."""
+        """Dispatches query to OpenAI gpt-4o-mini / gpt-5.4 with semantic RAG memory and multimodal vision."""
         if not self.openai_client:
             raise RuntimeError("OpenAI client not initialized")
 
-        # Selective BM25/keyword memory retrieval
         req_mem = classification.get("requires_memory_retrieval", True) if classification else True
         search_q = classification.get("memory_search_query", "") if classification else ""
         if not search_q:
@@ -931,7 +1171,6 @@ class AIAssistant:
             {"role": "system", "content": system_content}
         ]
 
-        # Append recent rolling in-session conversation history
         for turn in self.conversation_history:
             messages.append({"role": turn["role"], "content": str(turn["content"])})
 
@@ -957,9 +1196,9 @@ class AIAssistant:
             response = self.openai_client.chat.completions.create(
                 model=chosen_model,
                 messages=messages,
-                tools=COMPUTER_USE_TOOLS,
+                tools=CONVERSATION_TOOLS,
                 tool_choice="auto",
-                max_completion_tokens=400,
+                max_completion_tokens=1000,
                 temperature=0.2,
             )
         except Exception as err:
@@ -967,9 +1206,9 @@ class AIAssistant:
                 response = self.openai_client.chat.completions.create(
                     model=chosen_model,
                     messages=messages,
-                    tools=COMPUTER_USE_TOOLS,
+                    tools=CONVERSATION_TOOLS,
                     tool_choice="auto",
-                    max_completion_tokens=400,
+                    max_completion_tokens=1000,
                 )
             else:
                 raise err
@@ -981,10 +1220,7 @@ class AIAssistant:
 
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
-                try:
-                    func_args = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
-                except Exception:
-                    func_args = {}
+                func_args = _safe_parse_tool_arguments(tool_call.function.arguments or "")
 
                 if func_name == "start_computer_automation":
                     goal = func_args.get("goal", prompt)
@@ -993,6 +1229,7 @@ class AIAssistant:
                         task_prompt=goal,
                         on_status_change=on_status_change,
                         on_reply_generated=on_reply_generated,
+                        max_iterations=30,
                     )
                 elif func_name == "annotate_screen":
                     spoken_summary = func_args.get("spoken_response", "Here is the visual breakdown.")
@@ -1008,7 +1245,7 @@ class AIAssistant:
                         if on_annotations_generated:
                             on_annotations_generated(anns)
                         elif self.on_annotations_generated:
-                            on_annotations_generated(anns)
+                            self.on_annotations_generated(anns)
                     result_text = f"Annotations displayed on screen: {spoken_summary}"
                 else:
                     tool_func = self.available_tools.get(func_name)
@@ -1029,12 +1266,11 @@ class AIAssistant:
             if spoken_summary:
                 return spoken_summary
 
-            # Follow-up completion for natural spoken confirmation
             try:
                 follow_up = self.openai_client.chat.completions.create(
                     model=chosen_model,
                     messages=messages,
-                    max_completion_tokens=100,
+                    max_completion_tokens=200,
                     temperature=0.2,
                 )
                 return follow_up.choices[0].message.content or ""
@@ -1050,7 +1286,6 @@ class AIAssistant:
         classification: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Dispatches query strictly to local Ollama qwen2.5vl:3b as offline fallback."""
-        # Fallback guardrail: check if computer automation was requested
         if self._is_computer_control_task(prompt):
             return "Computer automation requires an active cloud connection and is unavailable offline."
 
@@ -1070,7 +1305,6 @@ class AIAssistant:
             {"role": "system", "content": system_content}
         ]
 
-        # Append recent rolling in-session conversation history
         for turn in self.conversation_history:
             messages.append({"role": turn["role"], "content": str(turn["content"])})
 
@@ -1121,6 +1355,9 @@ class AIAssistant:
                 else:
                     continue
 
+                if isinstance(func_args, str):
+                    func_args = _safe_parse_tool_arguments(func_args)
+
                 tool_func = self.available_tools.get(func_name)
                 if tool_func:
                     try:
@@ -1155,16 +1392,21 @@ class AIAssistant:
                 return str(response).strip()
 
     def _speak(self, text: str):
-        """Zero-latency local speech synthesis via native macOS say command."""
+        """Zero-latency local speech synthesis via native macOS say command with lifecycle signals."""
         if not text:
             return
         try:
+            self.signals.speaking_started.emit()
             clean_text = text.replace('"', '\\"').replace("'", "’")
             subprocess.run(["say", clean_text])
         except Exception as e:
             print(f"[ERROR] macOS TTS error: {e}")
+        finally:
+            try:
+                self.signals.speaking_finished.emit()
+            except Exception:
+                pass
 
 
 # Backward-compatible alias
 GeminiAssistant = AIAssistant
-

@@ -1,8 +1,7 @@
 """
 AR Visual Screen Annotation Canvas for Open FRIDAY.
-Renders real-time glowing bounding boxes and floating glassmorphic callout cards
-anchored directly adjacent to screen elements, diagrams, circuits, and UI features.
-Includes a 10-second auto-dismiss timer and smooth opacity fadeout animations.
+Renders clean glowing bounding boxes and floating glassmorphic callout cards
+anchored directly to on-screen components, diagrams, circuits, and code.
 """
 
 from typing import List, Dict, Any, Optional
@@ -15,7 +14,6 @@ from PyQt6.QtGui import (
     QBrush,
     QFont,
     QFontMetrics,
-    QPainterPath,
     QGuiApplication,
 )
 import permissions
@@ -25,7 +23,7 @@ class AnnotationOverlay(QWidget):
     """Fullscreen transparent, click-through AR canvas for visual annotations."""
 
     def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(None)  # Top-level window
+        super().__init__(None)
         self.setWindowTitle("Open FRIDAY - AR Annotation Canvas")
 
         self.setWindowFlags(
@@ -44,16 +42,16 @@ class AnnotationOverlay(QWidget):
         self.fade_timer = QTimer(self)
         self.fade_timer.setSingleShot(True)
         self.fade_timer.timeout.connect(self.start_fadeout)
-        self.dismiss_timer = self.fade_timer  # alias
+        self.dismiss_timer = self.fade_timer
 
         # Opacity Fadeout Animation
         self.anim = QPropertyAnimation(self, b"windowOpacity")
-        self.anim.setDuration(500)
+        self.anim.setDuration(450)
         self.anim.setStartValue(1.0)
         self.anim.setEndValue(0.0)
         self.anim.setEasingCurve(QEasingCurve.Type.OutQuad)
         self.anim.finished.connect(self._on_fade_finished)
-        self.fade_anim = self.anim  # alias
+        self.fade_anim = self.anim
 
     def _sync_geometry(self):
         screen = QGuiApplication.primaryScreen()
@@ -73,8 +71,8 @@ class AnnotationOverlay(QWidget):
         permissions.setup_macos_fullscreen_overlay(self)
 
     def display_annotations(self, annotations: List[Dict[str, Any]], spoken_response: str = ""):
-        """Slot connected to signals.annotations_ready or vision_engine."""
-        print(f"[AR OVERLAY DEBUG] Received {len(annotations)} annotations for rendering.")
+        """Slot to render a list of visual bounding boxes and callout cards."""
+        print(f"[AR OVERLAY] Received {len(annotations)} annotations for rendering.")
         if not annotations:
             self.clear_annotations()
             return
@@ -88,15 +86,12 @@ class AnnotationOverlay(QWidget):
         self.show()
         self.raise_()
         self.update()
-        self.repaint()
-        print(f"[AR OVERLAY DEBUG] Overlay geometry: {self.geometry().getRect()}, visible={self.isVisible()}, opacity={self.windowOpacity()}")
 
         # Reset and restart 10-second auto-dismiss timer
         self.fade_timer.stop()
         self.fade_timer.start(10000)
 
     def show_annotations(self, annotations: List[Dict[str, Any]]):
-        """Alias for display_annotations."""
         self.display_annotations(annotations)
 
     def clear_annotations(self):
@@ -110,14 +105,15 @@ class AnnotationOverlay(QWidget):
         self.hide()
 
     def start_fadeout(self):
-        """Starts 500ms smooth fadeout animation."""
+        """Starts smooth fadeout animation."""
+        if not self.isVisible() or self.windowOpacity() <= 0.01:
+            return
         self.anim.stop()
         self.anim.setStartValue(self.windowOpacity())
         self.anim.setEndValue(0.0)
         self.anim.start()
 
     def _on_fade_finished(self):
-        """Hides overlay after fadeout completes."""
         self.active_annotations = []
         self.hide()
 
@@ -137,8 +133,14 @@ class AnnotationOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
 
-        sw = self.width()
-        sh = self.height()
+        sw = float(self.width())
+        sh = float(self.height())
+
+        title_font = QFont("Helvetica Neue", 11, QFont.Weight.Bold)
+        body_font = QFont("Helvetica Neue", 10, QFont.Weight.Normal)
+        body_metrics = QFontMetrics(body_font)
+
+        occupied_card_rects: List[QRectF] = []
 
         for item in self.active_annotations:
             box = item.get("box_2d", [0, 0, 0, 0])
@@ -148,10 +150,11 @@ class AnnotationOverlay(QWidget):
             ymin, xmin, ymax, xmax = box[0], box[1], box[2], box[3]
 
             # 1. Map normalized grid (0-1000) to display pixels
-            rx = int((xmin / 1000.0) * sw)
-            ry = int((ymin / 1000.0) * sh)
-            rw = max(20, int(((xmax - xmin) / 1000.0) * sw))
-            rh = max(20, int(((ymax - ymin) / 1000.0) * sh))
+            rx = (xmin / 1000.0) * sw
+            ry = (ymin / 1000.0) * sh
+            rw = max(16.0, ((xmax - xmin) / 1000.0) * sw)
+            rh = max(16.0, ((ymax - ymin) / 1000.0) * sh)
+            target_rect = QRectF(rx, ry, rw, rh)
 
             color_hex = item.get("color", "#3b82f6")
             base_color = QColor(color_hex)
@@ -162,51 +165,75 @@ class AnnotationOverlay(QWidget):
             glow_color = QColor(base_color.red(), base_color.green(), base_color.blue(), 45)
             painter.setPen(QPen(glow_color, 6.0))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rx - 2, ry - 2, rw + 4, rh + 4, 8, 8)
+            painter.drawRoundedRect(QRectF(rx - 2, ry - 2, rw + 4, rh + 4), 8.0, 8.0)
 
             painter.setPen(QPen(base_color, 2.0))
             painter.setBrush(QBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 25)))
-            painter.drawRoundedRect(rx, ry, rw, rh, 8, 8)
+            painter.drawRoundedRect(target_rect, 8.0, 8.0)
 
-            # 3. Dynamic Card Geometry Calculation (Placed directly above box, flipped below if near top)
-            card_w = 240
-            card_h = 68
+            # 3. Dynamic Card Geometry Calculation (FontMetrics based)
+            card_w = 260.0
+            label_text = str(item.get("label", ""))
+            desc_text = str(item.get("text", ""))
 
-            # Horizontally center card relative to bounding box
-            card_x = rx + (rw // 2) - (card_w // 2)
-            # Clamp horizontally within screen padding
-            card_x = max(12, min(card_x, sw - card_w - 12))
+            content_h = 16.0
+            if label_text:
+                content_h += 16.0
+            if desc_text:
+                text_bounding = body_metrics.boundingRect(
+                    0, 0, int(card_w - 24.0), 1000, int(Qt.TextFlag.TextWordWrap), desc_text
+                )
+                content_h += max(18.0, float(text_bounding.height())) + 8.0
 
-            # Place above box; flip below if too close to top edge
-            if ry > card_h + 16:
-                card_y = ry - card_h - 8
+            card_h = max(50.0, min(140.0, content_h + 10.0))
+
+            # Initial placement: centered above box
+            card_x = rx + (rw / 2.0) - (card_w / 2.0)
+            card_x = max(12.0, min(card_x, sw - card_w - 12.0))
+
+            if ry > card_h + 16.0:
+                card_y = ry - card_h - 10.0
             else:
-                card_y = ry + rh + 8
+                card_y = ry + rh + 10.0
 
-            # 4. Render Dark Glass Card (Matching HUDContextCard style)
-            painter.setPen(QPen(QColor(255, 255, 255, 30), 1.0))
-            painter.setBrush(QBrush(QColor(18, 20, 26, 230)))
-            painter.drawRoundedRect(card_x, card_y, card_w, card_h, 10, 10)
+            # Collision avoidance pass against previously placed cards
+            card_rect = QRectF(card_x, card_y, card_w, card_h)
+            for prev_rect in occupied_card_rects:
+                if card_rect.intersects(prev_rect):
+                    # Shift vertically or horizontally
+                    if card_y < prev_rect.y():
+                        card_y = prev_rect.y() - card_h - 8.0
+                    else:
+                        card_y = prev_rect.y() + prev_rect.height() + 8.0
+                    card_y = max(12.0, min(card_y, sh - card_h - 12.0))
+                    card_rect = QRectF(card_x, card_y, card_w, card_h)
+
+            occupied_card_rects.append(card_rect)
+
+            # 4. Render Dark Glassmorphic Card
+            painter.setPen(QPen(QColor(255, 255, 255, 32), 1.0))
+            painter.setBrush(QBrush(QColor(16, 18, 24, 235)))
+            painter.drawRoundedRect(card_rect, 10.0, 10.0)
 
             # Accent color pill indicator on card
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QBrush(base_color))
-            painter.drawRoundedRect(card_x + 10, card_y + 11, 4, 14, 2, 2)
+            painter.drawRoundedRect(QRectF(card_rect.x() + 10, card_rect.y() + 12, 4, 14), 2.0, 2.0)
 
             # Title Text
-            label_text = item.get("label", "")
             if label_text:
                 painter.setPen(QColor(255, 255, 255, 245))
-                painter.setFont(QFont("-apple-system", 11, QFont.Weight.Bold))
-                painter.drawText(card_x + 20, card_y + 22, label_text)
+                painter.setFont(title_font)
+                painter.drawText(int(card_rect.x() + 20), int(card_rect.y() + 24), label_text)
 
             # Description Subtext
-            desc_text = item.get("text", "")
             if desc_text:
-                painter.setPen(QColor(161, 161, 170, 230))
-                painter.setFont(QFont("-apple-system", 10, QFont.Weight.Normal))
-                text_rect = QRectF(card_x + 10, card_y + 28, card_w - 20, 36)
+                painter.setPen(QColor(212, 212, 216, 235))
+                painter.setFont(body_font)
+                text_rect = QRectF(card_rect.x() + 10, card_rect.y() + 32, card_w - 20, card_h - 38)
                 painter.drawText(text_rect, int(Qt.TextFlag.TextWordWrap), desc_text)
+
+        painter.end()
 
 
 # Compatibility alias
