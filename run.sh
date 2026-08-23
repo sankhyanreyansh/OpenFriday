@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FRIDAY - macOS Hand Gesture Desktop Controller Launcher
+# Open FRIDAY - macOS Hand Gesture Desktop Controller Launcher
 # ==============================================================================
 
 set -e

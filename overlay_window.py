@@ -1,5 +1,5 @@
 """
-Monochrome Glassmorphic On-Screen HUD Reticle Overlay for FRIDAY.
+Monochrome Glassmorphic On-Screen HUD Reticle Overlay for Open FRIDAY.
 Pure white, silver, and translucent charcoal aesthetics (strictly zero neon).
 Configured for macOS Fullscreen Auxiliary Spaces & High Window Levels.
 """
@@ -62,6 +62,7 @@ class TransparentOverlay(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("Open FRIDAY - Reticle Overlay")
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |

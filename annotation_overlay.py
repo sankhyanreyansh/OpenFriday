@@ -1,5 +1,5 @@
 """
-AR Visual Screen Annotation Canvas for FRIDAY.
+AR Visual Screen Annotation Canvas for Open FRIDAY.
 Renders real-time glowing bounding boxes and floating glassmorphic callout cards
 anchored directly adjacent to screen elements, diagrams, circuits, and UI features.
 Includes a 10-second auto-dismiss timer and smooth opacity fadeout animations.
@@ -26,6 +26,7 @@ class AnnotationOverlay(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(None)  # Top-level window
+        self.setWindowTitle("Open FRIDAY - AR Annotation Canvas")
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |

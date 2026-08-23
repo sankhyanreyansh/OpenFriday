@@ -261,7 +261,7 @@ OPENAI_TOOLS = COMPUTER_USE_TOOLS
 
 class AIAssistant:
     """
-    Dual-Tier AI Desktop Assistant for FRIDAY:
+    Dual-Tier AI Desktop Assistant for Open FRIDAY:
     1. Primary Tier: OpenAI API (gpt-4o-mini for general chat/router, gpt-5.4 for vision/computer use).
     2. Fallback Tier: Local Ollama (strictly qwen2.5vl:3b) when offline or API is unavailable.
     """
@@ -307,7 +307,7 @@ class AIAssistant:
         self.signals = AIAssistantSignals()
 
         self.system_instruction = (
-            "You are FRIDAY, an autonomous desktop assistant with full macOS GUI automation (Computer Use), Long-Term Memory, and AR visual annotation capabilities.\n\n"
+            "You are Open FRIDAY, an open-source autonomous desktop AI assistant. When speaking conversationally with the user, you may refer to yourself simply as Friday.\n\n"
             f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
             "VISUAL COORDINATE REFERENCE:\n"
             "- The full-screen screenshot includes a subtle reference coordinate grid labeled from 0 to 1000 along both axes.\n"
@@ -423,7 +423,7 @@ class AIAssistant:
                     {
                         "role": "system",
                         "content": (
-                            "You are a fast, low-latency triage router for FRIDAY, an AI desktop assistant. "
+                            "You are a fast, low-latency triage router for Open FRIDAY, an AI desktop assistant. "
                             "Analyze the user's utterance and return a JSON object with:\n"
                             "- \"target_model\": \"gpt-4o-mini\" (for conversation, facts, math, basic questions, memory recall, fast tool calling) or \"gpt-5.4\" (for deep visual inspection of diagrams/circuits, code on screen, complex UI annotation).\n"
                             "- \"requires_screen_context\": boolean. Set to TRUE ONLY if the user is asking about visual content currently visible on their screen (e.g. 'what is on my screen', 'explain this diagram', 'read the text in this window', 'where is the button'). Set to FALSE for math (e.g. 'what is 7+7'), general knowledge, conversations, memory queries, or questions with no visual reference.\n"

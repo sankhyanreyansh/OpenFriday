@@ -1,5 +1,5 @@
 """
-Minimalist Monochrome Glassmorphic Status Pill for FRIDAY.
+Minimalist Monochrome Glassmorphic Status Pill for Open FRIDAY.
 2-Layer Centered Architecture with 11px vertical and 8px horizontal breathing headroom.
 Equal 20px top and right screen margins, eliminating all bottom and edge clipping.
 """
@@ -95,6 +95,7 @@ class GlassmorphicStatusPill(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("Open FRIDAY - Status Pill")
         self.setObjectName("hudRoot")
         self.setStyleSheet(STATUS_PILL_STYLESHEET)
 
@@ -343,6 +344,7 @@ class HUDContextCard(QWidget):
 
     def __init__(self, anchor_pill: Optional[QWidget] = None):
         super().__init__()
+        self.setWindowTitle("Open FRIDAY - Context Card")
         self.setObjectName("contextRoot")
         self.setStyleSheet(CONTEXT_CARD_STYLESHEET)
         self.anchor_pill = anchor_pill

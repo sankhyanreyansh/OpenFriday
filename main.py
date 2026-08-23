@@ -38,13 +38,13 @@ def load_config() -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="FRIDAY - macOS Hand Gesture Desktop Controller")
+    parser = argparse.ArgumentParser(description="Open FRIDAY - macOS Hand Gesture Desktop Controller")
     parser.add_argument("--camera", type=int, default=None, help="Camera device index")
     parser.add_argument("--no-overlay", action="store_true", help="Disable transparent on-screen HUD reticle")
     parser.add_argument("--no-sidebar", action="store_true", help="Disable glassmorphic HUD pill")
     args = parser.parse_args()
 
-    print("Initializing FRIDAY...")
+    print("Initializing Open FRIDAY...")
 
     try:
         # Load startup configuration from config.json
@@ -56,8 +56,8 @@ def main():
         # 0. Configure macOS Accessory Activation Policy (Daemon / Agent mode)
         permissions.set_macos_accessory_policy()
 
-        QApplication.setApplicationName("FRIDAY")
-        QApplication.setOrganizationName("FRIDAY")
+        QApplication.setApplicationName("Open FRIDAY")
+        QApplication.setOrganizationName("Open FRIDAY")
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
 
@@ -118,7 +118,7 @@ def main():
 
         tray_menu.addSeparator()
 
-        quit_action = QAction("Quit FRIDAY", tray)
+        quit_action = QAction("Quit Open FRIDAY", tray)
         quit_action.triggered.connect(app.quit)
         tray_menu.addAction(quit_action)
 
@@ -137,7 +137,7 @@ def main():
             hud_pill.show()
             hud_pill.raise_()
 
-        print("FRIDAY launched successfully.")
+        print("Open FRIDAY launched successfully.")
 
         def cleanup():
             vision_thread.stop()
@@ -158,7 +158,7 @@ def main():
         sys.exit(app.exec())
 
     except Exception as e:
-        print(f"FRIDAY failed to launch: {e}")
+        print(f"Open FRIDAY failed to launch: {e}")
         sys.exit(1)
 
 
