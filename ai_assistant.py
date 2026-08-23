@@ -3,11 +3,13 @@ Dual-Tier AI Assistant Engine for Open FRIDAY.
 Primary: OpenAI API (gpt-4o-mini for fast routing/chat, gpt-5.4 for visual perception, annotations & computer control).
 Fallback: Local Ollama (qwen2.5vl:3b for offline resilience).
 Features:
+- State-of-the-art Prompt Engineering with Voice-First Output Contract and Unabridged Code Execution.
+- Hybrid Computer Use & Sandboxed Bash Execution (`execute_bash`).
 - Unambiguous Intent Routing (Visual AR Annotation vs. Desktop Computer Use).
 - Set-of-Marks (SoM) Accessibility Grounding for 100% click accuracy.
 - Semantic Vector RAG via FastEmbed MemoryVault.
 - Step-by-Step Action Verification and Consecutive Action Stall Detection (3x repeat prevention).
-- Robust Tool Argument Parsing & Large Token Budgets (2500 tokens) for smooth code typing.
+- Robust Tool Argument Parsing & Large Token Budgets (4096 tokens) for smooth, complete code writing.
 - Local speech synthesis with lifecycle tracking.
 """
 
@@ -29,6 +31,7 @@ import ollama
 from system_tools import open_website, open_application
 from computer_controller import MacComputerController
 from memory_vault import MemoryVault
+from bash_executor import BashExecutor
 
 # Load environment variables (.env)
 load_dotenv()
@@ -81,7 +84,7 @@ def _safe_parse_tool_arguments(raw_args: str) -> Dict[str, Any]:
             result[field] = int(num_match.group(1))
 
     # Extract string fields
-    for field in ["combo", "url", "app_name", "summary", "button", "key", "goal"]:
+    for field in ["combo", "url", "app_name", "summary", "button", "key", "goal", "command"]:
         str_match = re.search(rf'"{field}"\s*:\s*"([^"]+)"', raw_args)
         if str_match:
             result[field] = str_match.group(1)
@@ -114,7 +117,7 @@ CONVERSATION_TOOLS = [
                 "properties": {
                     "spoken_response": {
                         "type": "string",
-                        "description": "Brief 1-2 sentence spoken summary for voice output.",
+                        "description": "Brief 1-sentence spoken summary for voice output.",
                     },
                     "annotations": {
                         "type": "array",
@@ -153,8 +156,25 @@ CONVERSATION_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "execute_bash",
+            "description": "Execute a non-destructive macOS terminal command or osascript (AppleScript) snippet. Use this for deterministic actions like launching apps, file lookups, clipboard operations, web curl requests, or media controls instead of slow visual clicking.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The exact shell command to execute (e.g. 'open -a \"Spotify\"', 'osascript -e \"tell application \\\"Finder\\\" to open POSIX file \\\"/Users\\\"\"', 'ls -la ~/Downloads')."
+                    }
+                },
+                "required": ["command"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "start_computer_automation",
-            "description": "Trigger this ONLY when the user asks you to actively click, type, automate software, search websites, or perform multi-step desktop tasks.",
+            "description": "Trigger this ONLY when the user asks you to actively click, type, write code in their editor, automate software, search websites, or perform multi-step desktop tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -226,6 +246,27 @@ CONVERSATION_TOOLS = [
 # Action Tools available strictly INSIDE the autonomous Computer Agent Loop
 # Each action requires mandatory visual observation and verification
 COMPUTER_ACTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "execute_bash",
+            "description": "Execute a non-destructive macOS terminal command or osascript (AppleScript) snippet deterministically (e.g. launch apps with 'open -a', volume/media controls via osascript, file lookups, curl) instead of slow visual clicking.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "observation_and_verification": {
+                        "type": "string",
+                        "description": "MANDATORY: 1-2 sentences describing current visual state and why this terminal/AppleScript command is needed.",
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "The exact shell command or osascript to execute.",
+                    },
+                },
+                "required": ["command", "observation_and_verification"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -334,7 +375,7 @@ COMPUTER_ACTION_TOOLS = [
         "type": "function",
         "function": {
             "name": "computer_type",
-            "description": "Type or paste text/code into the currently focused window, text field, or notebook cell via fast clipboard injection (preserves user's prior clipboard history).",
+            "description": "Type or paste full, unabridged code or text into the currently focused window, text field, or notebook cell via fast clipboard injection (preserves user's prior clipboard history).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -344,7 +385,7 @@ COMPUTER_ACTION_TOOLS = [
                     },
                     "text": {
                         "type": "string",
-                        "description": "The exact string, text, or multi-line code to type or paste.",
+                        "description": "The exact full string, text, or multi-line code to type or paste.",
                     },
                     "press_enter": {
                         "type": "boolean",
@@ -527,6 +568,9 @@ class AIAssistant:
         # Semantic Vector RAG Memory Vault
         self.memory_vault = MemoryVault()
 
+        # Safe Non-Blocking Bash Executor
+        self.bash_executor = BashExecutor(default_timeout=10.0)
+
         # In-Session Rolling Conversation History
         self.conversation_history: List[Dict[str, Any]] = []
         self.max_history_turns: int = 12
@@ -548,25 +592,29 @@ class AIAssistant:
         # Dedicated Qt GUI Signals
         self.signals = AIAssistantSignals()
 
+        # State-of-the-Art Voice-First Prompt Engineering Contract
         self.system_instruction = (
-            "You are Open FRIDAY, an open-source autonomous desktop AI assistant. When speaking conversationally with the user, you may refer to yourself simply as Friday.\n\n"
-            f"Screen dimensions: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
-            "CRITICAL INTENT DISAMBIGUATION RULES:\n"
-            "1. ON-SCREEN VISUAL EXPLANATION & ANNOTATION:\n"
-            "   - When the user asks to explain, describe, point out, locate, highlight, or break down visual elements, diagrams, code, circuits, or UI features on their screen:\n"
-            "     -> You MUST call `annotate_screen` with bounding boxes [ymin, xmin, ymax, xmax] (0-1000 grid), short label, concise explanation, and color.\n"
-            "     -> Provide a 1-2 sentence spoken summary in `spoken_response`.\n"
-            "     -> NEVER call computer automation tools (click, type) for visual explanation/annotation requests.\n\n"
-            "2. DESKTOP GUI AUTOMATION:\n"
-            "   - When the user explicitly asks you to click, type, write code in their editor, open new tabs, control applications, search websites, or perform multi-step computer actions:\n"
-            "     -> Call `start_computer_automation` to execute the actions autonomously.\n\n"
-            "3. PERSONAL MEMORY RECALL & STORAGE:\n"
-            "   - If the user asks you to remember, save, or store a personal fact, preference, note, or project detail:\n"
-            "     -> Call `save_user_memory`.\n\n"
-            "4. CONVERSATION & GENERAL KNOWLEDGE:\n"
-            "   - If the user asks a theoretical question, math, or conversational query with no screen interaction:\n"
-            "     -> Answer directly in 1-2 concise sentences for spoken audio.\n"
-            "   - Spoken Audio: Respond naturally and concisely in 1 to 2 sentences suitable for spoken audio. Never use markdown formatting, asterisks, bullet points, emojis, or code blocks."
+            "You are Open FRIDAY, an ultra-fast, voice-first autonomous AI desktop assistant on macOS. When speaking conversationally with the user, refer to yourself simply as Friday.\n\n"
+            f"Active Display Logical Resolution: {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
+            "=== CONVERSATIONAL VOICE OUTPUT CONTRACT ===\n"
+            "- VOICE-FIRST CONCISENESS: Every direct text answer you emit is read aloud to the user via local speech synthesis (TTS). Keep all conversational answers natural, punchy, and strictly 1 to 2 sentences maximum.\n"
+            "- NO CODE OR MARKDOWN IN SPEECH: Never recite raw code blocks, syntax, curly braces, imports, markdown tables, asterisks (**bold**), bullet points, headers, or URLs in conversational voice output.\n"
+            "- CODE CREATION REQUESTS: If the user asks you to write code, create a script, or build something on their desktop, DO NOT speak the code aloud. Instead, immediately trigger `execute_bash` (to write/create files directly) or `start_computer_automation` (to type/paste it into their focused editor/notebook). If the user asks a theoretical programming question, explain the concept conceptually in 1-2 plain spoken English sentences.\n\n"
+            "=== HYBRID AUTOMATION & DETERMINISTIC TOOL USAGE ===\n"
+            "1. TERMINAL & APPLESCRIPT FIRST (`execute_bash`):\n"
+            "   - Always prefer `execute_bash` for deterministic actions that can be executed via CLI or AppleScript (e.g. `open -a \"AppName\"`, writing files, file search `find`/`ls`, volume/media controls via `osascript`, `curl` requests, reading clipboard).\n"
+            "2. DESKTOP GUI AUTOMATION (`start_computer_automation`):\n"
+            "   - Call `start_computer_automation` when the user asks you to interact with graphical desktop interfaces, click buttons, fill out web forms, or control software lacking a CLI interface.\n"
+            "3. ON-SCREEN VISUAL EXPLANATION (`annotate_screen`):\n"
+            "   - When the user asks to explain, describe, point out, find, highlight, or break down diagrams, circuits, errors, or visual features visible on their screen:\n"
+            "     -> You MUST call `annotate_screen` with normalized [ymin, xmin, ymax, xmax] bounding boxes (0-1000 scale), labels, concise text, and colors.\n"
+            "     -> Provide a 1-sentence spoken summary in `spoken_response`.\n"
+            "     -> NEVER call computer click/type tools for visual inspection requests.\n"
+            "4. PERSONAL MEMORY VAULT (`save_user_memory`):\n"
+            "   - When the user shares personal facts, preferences, project details, or says 'remember that...':\n"
+            "     -> Call `save_user_memory` to store it in semantic RAG.\n"
+            "5. SECURITY RESTRICTION:\n"
+            "   - Root privilege elevation (`sudo`, `doas`) and destructive system commands are strictly prohibited."
         )
 
         self.available_tools = {
@@ -579,11 +627,12 @@ class AIAssistant:
             "computer_hotkey": self.controller.hotkey,
             "computer_scroll": self.controller.scroll,
             "inspect_region": self._handle_inspect_region,
+            "execute_bash": self.bash_executor.run,
             "open_website": open_website,
             "open_application": open_application,
             "save_user_memory": lambda category_file, fact_or_preference: self.memory_vault.save_memory(category_file, fact_or_preference),
         }
-        self.tools = [open_website, open_application]
+        self.tools = [open_website, open_application, self.bash_executor.run]
 
         self.context_image_bytes: Optional[bytes] = None
         self.on_context_changed: Optional[Callable[[Optional[bytes]], None]] = None
@@ -907,7 +956,7 @@ class AIAssistant:
     ) -> str:
         """
         Autonomous Set-of-Marks (SoM) Perception-Action loop using COMPUTER_ACTION_TOOLS strictly,
-        with step-by-step verification, resilient JSON parsing, and 3x consecutive identical action stall detection.
+        with step-by-step verification, resilient JSON parsing, 4096-token budget, and 3x consecutive identical action stall detection.
         """
         if not self.openai_client:
             fallback_msg = "Computer automation requires an active cloud connection and is unavailable offline."
@@ -935,21 +984,24 @@ class AIAssistant:
             b64_init, init_w, init_h, elements_summary = self.controller.capture_screen_base64(apply_grid=True, apply_som=True)
 
             system_prompt = (
-                f"You are an expert desktop GUI automation agent interacting with a macOS screen of logical resolution {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
-                "SET-OF-MARKS (SoM) ELEMENT GROUNDING:\n"
+                f"You are an expert autonomous macOS desktop GUI automation agent interacting with a logical display resolution of {self.controller.screen_width}x{self.controller.screen_height}.\n\n"
+                "=== HIGH-CAPACITY CODE & AUTOMATION OUTPUT CONTRACT ===\n"
+                "- COMPLETE & UNABRIDGED IMPLEMENTATIONS: When generating code or text to insert via `computer_type` or write to files via `execute_bash`, you have a generous 4096-token budget. Always output the full, complete, working implementation without truncations, omitted sections, or '# ...rest of code...' placeholders.\n"
+                "- DETERMINISTIC HYBRID EXECUTION: Prefer `execute_bash(command=...)` for deterministic CLI or AppleScript operations (e.g. launching applications with `open -a`, writing files, volume/media controls, curl requests) instead of slow visual clicking.\n"
+                "- NEVER attempt `sudo` or destructive system modifications.\n\n"
+                "=== SET-OF-MARKS (SoM) ACCESSIBILITY GROUNDING ===\n"
                 "- Interactive UI buttons, inputs, tabs, search bars, and links are labeled with numeric ID badges: [1], [2], [3]...\n"
-                "- ALWAYS PREFER calling `click_element(element_id=...)` with the exact badge number for 100% click precision.\n"
-                "- Use `computer_click(x, y)` as a fallback only when clicking on an untagged canvas or video area.\n"
+                "- ALWAYS PREFER calling `click_element(element_id=...)` with the exact numeric badge for 100% click precision.\n"
+                "- Use `computer_click(x, y)` as a fallback only when clicking on an untagged canvas, video player, or custom graphics widget.\n"
                 "- Use `computer_hotkey(combo='cmd+t')` or `computer_hotkey(combo='cmd+w')` for fast browser/tab control.\n"
                 "- Use `inspect_region(x, y)` if you need a high-resolution zoomed crop of dense code or small text.\n\n"
-                "MANDATORY STEP-BY-STEP VISUAL VERIFICATION:\n"
+                "=== MANDATORY STEP-BY-STEP VISUAL VERIFICATION ===\n"
                 "- In EVERY tool call, you MUST provide the `observation_and_verification` parameter before selecting the action.\n"
-                "- Carefully compare the current screenshot with the previous screenshot. Explicitly state what changed, verify if the previous action succeeded, and explain why the next action is required.\n"
+                "- Carefully compare the current screenshot with the previous screenshot. Explicitly state what changed, verify whether the previous action succeeded, and explain why the next action is required.\n"
                 "- If an element click or typing action didn't take effect, do not repeat the exact same failed action. Try an alternate approach (e.g. Set-of-Marks ID badge, keyboard shortcut like 'cmd+a' then typing, or inspect_region).\n\n"
-                "COMPUTER USE AGENT INSTRUCTIONS:\n"
-                "1. END-TO-END AUTONOMY: Complete multi-step tasks end-to-end without stopping for confirmation until calling `finish_task`.\n"
-                "2. MANDATORY VISUAL VERIFICATION: Inspect each updated screenshot to confirm your previous action took effect before proceeding.\n"
-                "3. When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation."
+                "=== COMPLETION ===\n"
+                "- Complete multi-step tasks end-to-end autonomously without stopping for confirmation until calling `finish_task`.\n"
+                "- When the user's goal is fully achieved, call finish_task(summary='...') with a concise 1-sentence confirmation suitable for spoken audio."
             )
 
             init_img_content = {
@@ -988,7 +1040,7 @@ class AIAssistant:
                             messages=messages,
                             tools=COMPUTER_ACTION_TOOLS,
                             tool_choice="auto",
-                            max_completion_tokens=2500,
+                            max_completion_tokens=4096,
                             temperature=0.2,
                         )
                     except Exception as param_err:
@@ -998,7 +1050,7 @@ class AIAssistant:
                                 messages=messages,
                                 tools=COMPUTER_ACTION_TOOLS,
                                 tool_choice="auto",
-                                max_completion_tokens=2500,
+                                max_completion_tokens=4096,
                             )
                         else:
                             raise param_err
@@ -1270,7 +1322,7 @@ class AIAssistant:
                 follow_up = self.openai_client.chat.completions.create(
                     model=chosen_model,
                     messages=messages,
-                    max_completion_tokens=200,
+                    max_completion_tokens=250,
                     temperature=0.2,
                 )
                 return follow_up.choices[0].message.content or ""
