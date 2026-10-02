@@ -21,8 +21,16 @@ from PyQt6.QtGui import (
     QGuiApplication,
 )
 
-from gesture_recognizer import GestureState, GestureData
-import permissions
+try:
+    from src.vision.gesture_recognizer import GestureState, GestureData
+    from src.control import permissions
+except ImportError:
+    try:
+        from vision.gesture_recognizer import GestureState, GestureData
+        from control import permissions
+    except ImportError:
+        from gesture_recognizer import GestureState, GestureData
+        import permissions
 
 
 class ClickRipple:

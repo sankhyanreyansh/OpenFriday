@@ -1,15 +1,4 @@
 {
-  "app_name": "Open FRIDAY",
-  "tracking_enabled": true,
-  "mouse_control_enabled": true,
-  "mirror_horizontal": true,
-  "camera_id": 0,
-  "margin_x": 0.16,
-  "margin_y": 0.16,
-  "min_cutoff": 0.2,
-  "beta": 0.003,
-  "pinch_threshold": 0.4,
-  "scroll_sensitivity": 1.0,
-  "show_reticle": true,
-  "show_pinch_meter": true
+  "model_type": "openai",
+  "model_id": "gpt-4o"
 }

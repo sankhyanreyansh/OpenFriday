@@ -82,13 +82,13 @@ cd OpenFriday
 ---
 
 ### Step 2: Configure Environment Variables
-Create a `.env` file in the root directory and add your API keys:
+Create a `.env` file in the root directory and add your OpenAI API key:
 
 ```bash
 OPENAI_API_KEY=your_openai_api_key_here
 ```
 
-*(Optional: Set `ANTHROPIC_API_KEY` or configure local models via Ollama if customized in `config.json`.)*
+*Note: Open FRIDAY uses OpenAI for all multimodal conversational intelligence, visual AR screen reasoning, and autonomous computer control.*
 
 ---
 
@@ -124,32 +124,76 @@ The launcher will automatically:
 
 ## Configuration
 
-You can customize runtime preferences in `config.json`:
+Open FRIDAY uses a streamlined `config.json` where you specify the AI model configuration:
 
 ```json
 {
-  "app_name": "Open FRIDAY",
-  "tracking_enabled": true,
-  "mouse_control_enabled": true,
-  "mirror_horizontal": true,
-  "camera_id": 0,
-  "margin_x": 0.16,
-  "margin_y": 0.16,
-  "min_cutoff": 0.2,
-  "beta": 0.003,
-  "pinch_threshold": 0.4,
-  "scroll_sensitivity": 1.0,
-  "show_reticle": true,
-  "show_pinch_meter": true
+  "model_type": "openai",
+  "model_id": "gpt-4o"
 }
 ```
 
-- `camera_id`: Webcam device index (`0` for built-in camera).
-- `tracking_enabled`: Toggle computer vision gesture tracking on or off.
-- `mouse_control_enabled`: Toggle system mouse injection.
-- `margin_x`, `margin_y`: Edge margins for camera coordinate mapping.
-- `scroll_sensitivity`: Multiplier for two-finger inertial scrolling speed.
-- `show_reticle` / `show_pinch_meter`: Toggle visual HUD feedback rings.
+- `model_type`: Model provider type (`"openai"` is the supported provider for all conversational and computer control actions).
+- `model_id`: Primary model identifier for complex vision and computer control (defaults to `"gpt-4o"`).
+
+All core vision pipeline, pointer smoothing, and tracking parameters are maintained with optimal built-in defaults in `config.py` (including One-Euro filter cutoff, camera device ID, margins, and scroll sensitivities). Any of these settings can also be optionally overridden in `config.json` if custom tuning is needed:
+
+| Parameter | Default | Description |
+| :--- | :--- | :--- |
+| `camera_id` | `0` | Webcam device index (`0` for built-in camera). |
+| `tracking_enabled` | `true` | Toggle computer vision gesture tracking on or off. |
+| `mouse_control_enabled` | `true` | Toggle system mouse injection. |
+| `mirror_horizontal` | `true` | Flip webcam feed horizontally for intuitive mirroring. |
+| `min_cutoff` | `0.2` | One-Euro filter minimum cutoff frequency (jitter reduction). |
+| `beta` | `0.003` | One-Euro filter speed coefficient (lag reduction). |
+| `pinch_threshold` | `0.4` | Normalized thumb-index distance threshold for click pinches. |
+| `scroll_sensitivity` | `1.0` | Multiplier for two-finger inertial scrolling speed. |
+| `show_reticle` | `true` | Toggle visual HUD cursor reticle. |
+| `show_pinch_meter` | `true` | Toggle visual HUD pinch meter gauge. |
+
+---
+
+## Architecture & Project Structure
+
+All application source code is organized into modular domain subpackages under `src/`:
+
+```
+OpenFriday/
+├── config.json               # Active model configuration (model_type, model_id)
+├── config.py                 # Centralized configuration manager & defaults
+├── requirements.txt          # Python dependencies
+├── README.md                 # Project documentation
+├── run.sh                    # Automated setup & launch script
+├── main.py                   # Root entrypoint launcher
+├── .env                      # API keys (OPENAI_API_KEY)
+└── src/
+    ├── main.py               # Core application orchestrator & Qt wiring
+    ├── vision/               # Camera capture, hand tracking & gesture recognition
+    │   ├── vision_engine.py      # Background capture thread & inference loop
+    │   ├── gesture_recognizer.py # Dual-hand gesture state machine & classifier
+    │   ├── landmark_smoother.py  # EMA landmark smoothing
+    │   └── one_euro_filter.py    # One-Euro velocity-adaptive cursor smoothing
+    ├── control/              # macOS desktop input & automation
+    │   ├── mouse_controller.py   # Quartz CoreGraphics native mouse events
+    │   ├── computer_controller.py# Set-of-Marks GUI grounding, typing & AppleScript
+    │   ├── accessibility_tree.py # macOS AXUIElement tree inspection
+    │   └── permissions.py        # Accessibility & camera permission checks
+    ├── audio/                # Voice dictation & Whisper transcription
+    │   └── dictation_engine.py   # Local faster-whisper push-to-talk transcription
+    ├── ui/                   # Transparent macOS HUD & AR overlays
+    │   ├── hud_sidebar.py        # Glassmorphic floating HUD status pill & card
+    │   ├── overlay_window.py     # Translucent reticle & radial shortcut menu
+    │   ├── annotation_overlay.py # High-visibility AR bounding boxes & callouts
+    │   └── grid_overlay.py       # 0-1000 coordinate grid & SoM badges
+    └── ai_assistant/         # Conversational AI & autonomous computer control
+        ├── assistant.py          # Conversational orchestrator & speech synthesis
+        ├── computer_agent.py     # Perception-action loop & stall detection
+        ├── prompts.py            # Grounding prompts & voice brevity guidelines
+        ├── tools.py              # OpenAI tool schemas & resilient JSON parser
+        ├── memory_vault.py       # Local FastEmbed RAG vector memory
+        ├── bash_executor.py      # Sandboxed subprocess execution
+        └── system_tools.py       # macOS application & website launch tools
+```
 
 ---
 

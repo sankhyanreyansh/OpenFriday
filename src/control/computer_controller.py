@@ -14,8 +14,16 @@ from PIL import Image, ImageGrab, ImageChops
 import Quartz.CoreGraphics as CG
 import AppKit
 
-from grid_overlay import draw_visual_coordinate_grid, draw_set_of_marks_overlay
-from accessibility_tree import AccessibilityTreeScraper, UIElementInfo
+try:
+    from .accessibility_tree import AccessibilityTreeScraper, UIElementInfo
+    from src.ui.grid_overlay import draw_visual_coordinate_grid, draw_set_of_marks_overlay
+except ImportError:
+    try:
+        from accessibility_tree import AccessibilityTreeScraper, UIElementInfo
+        from ui.grid_overlay import draw_visual_coordinate_grid, draw_set_of_marks_overlay
+    except ImportError:
+        from accessibility_tree import AccessibilityTreeScraper, UIElementInfo
+        from grid_overlay import draw_visual_coordinate_grid, draw_set_of_marks_overlay
 
 
 class MacComputerController:
@@ -279,7 +287,7 @@ class MacComputerController:
                 print(f"[CLIPBOARD RESTORE WARN] Failed to restore pasteboard: {e}")
 
         display_snippet = eff_text.replace("\n", "\\n")
-        return f"Typed text: '{display_snippet[:60]}{'...' if len(display_snippet) > 60 else ''}'"
+        return f"Typed text: {display_snippet[:60]}{'...' if len(display_snippet) > 60 else ''}"
 
     def hotkey(self, combo: str) -> str:
         """
@@ -320,7 +328,8 @@ class MacComputerController:
         if modifiers:
             combo = "+".join(modifiers + [key_name])
             return self.hotkey(combo)
-        return self.hotkey(key_name)
+        self.hotkey(key_name)
+        return f"Pressed key: {key_name}"
 
     def scroll(self, dy: int = 0, dx: int = 0) -> str:
         """Scrolls vertically (dy) or horizontally (dx) via Quartz."""

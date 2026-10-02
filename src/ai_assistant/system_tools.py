@@ -1,6 +1,6 @@
 """
 Deterministic macOS System Tools for FRIDAY AI Assistant.
-Provides safe, native system actions for launching applications and opening websites via Ollama tool calls.
+Provides safe, native system actions for launching applications and opening websites.
 """
 
 import subprocess

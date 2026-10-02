@@ -22,15 +22,34 @@ import mediapipe as mp
 
 from PyQt6.QtCore import QThread, pyqtSignal, QObject, QBuffer, QIODevice
 from PyQt6.QtGui import QImage, QGuiApplication
-from landmark_smoother import LandmarkSmoother
-from one_euro_filter import CursorSmoother, OneEuroFilter
-from gesture_recognizer import GestureRecognizer, GestureState, GestureData
-from mouse_controller import MouseController
-from dictation_engine import VoiceDictationEngine
-from ai_assistant import AIAssistant
+try:
+    from .landmark_smoother import LandmarkSmoother
+    from .one_euro_filter import CursorSmoother, OneEuroFilter
+    from .gesture_recognizer import GestureRecognizer, GestureState, GestureData
+except ImportError:
+    from landmark_smoother import LandmarkSmoother
+    from one_euro_filter import CursorSmoother, OneEuroFilter
+    from gesture_recognizer import GestureRecognizer, GestureState, GestureData
+
+try:
+    from src.control.mouse_controller import MouseController
+    from src.audio.dictation_engine import VoiceDictationEngine
+    from src.ai_assistant import AIAssistant
+except ImportError:
+    try:
+        from control.mouse_controller import MouseController
+        from audio.dictation_engine import VoiceDictationEngine
+        from ai_assistant import AIAssistant
+    except ImportError:
+        from mouse_controller import MouseController
+        from dictation_engine import VoiceDictationEngine
+        from ai_assistant import AIAssistant
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
-DEFAULT_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT_MODEL_PATH = os.path.join(ROOT_DIR, "hand_landmarker.task")
+LOCAL_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hand_landmarker.task")
+DEFAULT_MODEL_PATH = ROOT_MODEL_PATH if os.path.exists(ROOT_MODEL_PATH) else LOCAL_MODEL_PATH
 
 
 def ensure_model_file(model_path: str = DEFAULT_MODEL_PATH) -> str:
@@ -116,6 +135,8 @@ class VisionEngine(QThread):
         self,
         camera_id: int = 0,
         mouse_controller: Optional[MouseController] = None,
+        model_type: str = "openai",
+        model_id: str = "gpt-4o",
         parent: Optional[QObject] = None,
     ):
         super().__init__(parent)
@@ -124,9 +145,9 @@ class VisionEngine(QThread):
         self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
         self.gesture_recognizer = GestureRecognizer()
         
-        # Local Voice Dictation Engine (faster-whisper) & Local Ollama AI Assistant
+        # Local Voice Dictation Engine (faster-whisper) & OpenAI AI Assistant
         self.dictation_engine = VoiceDictationEngine(model_size="base.en")
-        self.ai_assistant = AIAssistant()
+        self.ai_assistant = AIAssistant(model_type=model_type, model_id=model_id)
         self.ai_assistant.on_annotations_generated = lambda anns: self.annotations_generated.emit(anns)
         self.ai_assistant.signals.annotations_ready.connect(
             lambda anns, spoken: self.annotations_generated.emit(anns)
@@ -204,6 +225,15 @@ class VisionEngine(QThread):
             self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_threshold"]) + 0.14
         if "scroll_sensitivity" in settings:
             self.gesture_recognizer.scroll_sensitivity = float(settings["scroll_sensitivity"])
+        if "model_type" in settings or "model_id" in settings:
+            model_type = settings.get("model_type", getattr(self.ai_assistant, "model_type", "openai"))
+            model_id = settings.get("model_id", getattr(self.ai_assistant, "model_id", "gpt-4o"))
+            self.ai_assistant.model_type = model_type
+            self.ai_assistant.model_id = model_id
+            self.ai_assistant.computer_use_model = model_id
+            self.ai_assistant.agent_model = model_id
+            if hasattr(self.ai_assistant, "computer_agent"):
+                self.ai_assistant.computer_agent.model_id = model_id
 
     def dismiss_radial_menu(self):
         """Dismisses the radial menu modal state."""
@@ -611,16 +641,17 @@ class VisionEngine(QThread):
                         rw = abs(x2 - x1)
                         rh = abs(y2 - y1)
                         if rw > 20 and rh > 20:
-                            screen = QGuiApplication.primaryScreen()
-                            if screen:
-                                pix = screen.grabWindow(0, int(rx), int(ry), int(rw), int(rh))
-                                if not pix.isNull():
-                                    buf = QBuffer()
-                                    buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                                    pix.save(buf, "PNG")
-                                    img_bytes = bytes(buf.data())
-                                    self.ai_assistant.set_context_image(img_bytes)
-                                    self.context_image_captured.emit(img_bytes)
+                            try:
+                                from PIL import ImageGrab
+                                import io
+                                shot = ImageGrab.grab(bbox=(int(rx), int(ry), int(rx + rw), int(ry + rh)))
+                                buf = io.BytesIO()
+                                shot.save(buf, format="PNG")
+                                img_bytes = buf.getvalue()
+                                self.ai_assistant.set_context_image(img_bytes)
+                                self.context_image_captured.emit(img_bytes)
+                            except Exception as grab_err:
+                                print(f"[SNIP CAPTURE ERROR] Thread-safe screen grab failed: {grab_err}")
 
                     # Handle Push-to-Talk Voice Dictation & Wake-Word Routing
                     if gesture_state == GestureState.LISTENING:

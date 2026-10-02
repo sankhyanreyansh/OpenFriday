@@ -155,7 +155,7 @@ class MemoryVault:
         self,
         query: str,
         top_k: int = 3,
-        min_similarity: float = 0.40
+        min_similarity: float = 0.60
     ) -> str:
         """
         Retrieves top-k relevant memory snippets using local semantic vector similarity search.

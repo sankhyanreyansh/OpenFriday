@@ -6,7 +6,13 @@ Set-of-Marks (SoM) element badges directly over screenshots for 100% VLM groundi
 
 from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont
-from accessibility_tree import UIElementInfo
+try:
+    from src.control.accessibility_tree import UIElementInfo
+except ImportError:
+    try:
+        from control.accessibility_tree import UIElementInfo
+    except ImportError:
+        from accessibility_tree import UIElementInfo
 
 
 def draw_visual_coordinate_grid(image: Image.Image) -> Image.Image:

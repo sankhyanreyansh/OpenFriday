@@ -16,7 +16,13 @@ from PyQt6.QtGui import (
     QFontMetrics,
     QGuiApplication,
 )
-import permissions
+try:
+    from src.control import permissions
+except ImportError:
+    try:
+        from control import permissions
+    except ImportError:
+        import permissions
 
 
 class AnnotationOverlay(QWidget):
