@@ -1,30 +1,18 @@
 """
 Centralized Configuration Manager for Open FRIDAY.
-Maintains system defaults for tracking, vision, and mouse control in code,
-while loading model preferences from config.json.
+Maintains system defaults for tracking, vision, and mouse control.
 """
 
-import sys
 import os
 import json
 from typing import Dict, Any
 
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-SRC_DIR = os.path.join(ROOT_DIR, "src")
-for sub in ["", "vision", "control", "audio", "ui", "ai_assistant"]:
-    p = os.path.join(SRC_DIR, sub) if sub else SRC_DIR
-    if p not in sys.path:
-        sys.path.insert(0, p)
-if ROOT_DIR not in sys.path:
-    sys.path.insert(0, ROOT_DIR)
-
 CONFIG_FILE_PATH = os.path.join(ROOT_DIR, "config.json")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    # Application & AI Model Settings
+    # Application Info
     "app_name": "Open FRIDAY",
-    "model_type": "openai",
-    "model_id": "gpt-4o",
 
     # Computer Vision & Tracking Settings
     "tracking_enabled": True,

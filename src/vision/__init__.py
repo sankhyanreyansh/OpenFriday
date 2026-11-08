@@ -10,8 +10,6 @@ from .landmark_smoother import LandmarkSmoother
 from .one_euro_filter import (
     OneEuroFilter,
     CursorSmoother,
-    smoothing_factor,
-    exponential_smoothing,
 )
 
 __all__ = [
@@ -24,6 +22,4 @@ __all__ = [
     "LandmarkSmoother",
     "OneEuroFilter",
     "CursorSmoother",
-    "smoothing_factor",
-    "exponential_smoothing",
 ]

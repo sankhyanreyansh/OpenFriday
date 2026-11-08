@@ -1,4 +1,7 @@
 {
-  "model_type": "openai",
-  "model_id": "gpt-4o"
+  "app_name": "Open FRIDAY",
+  "camera_id": 0,
+  "tracking_enabled": true,
+  "mouse_control_enabled": true,
+  "show_reticle": true
 }

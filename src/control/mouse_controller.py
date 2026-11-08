@@ -1,10 +1,10 @@
 """
 macOS Native Mouse & Cursor Controller using Quartz CoreGraphics.
 Provides low-latency, high-precision cursor movement, left/right clicks,
-drag-and-drop, double clicks, and linear bidirectional scrolling directly into the macOS Window Server.
+drag-and-drop, double clicks, linear bidirectional scrolling, space switching,
+zoom, and radial shortcut execution directly into the macOS Window Server.
 """
 
-import sys
 import time
 import subprocess
 import threading
@@ -18,6 +18,8 @@ except ImportError:
     import pyautogui
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0.0
+
+from src.control.radial_menu import execute_radial_action
 
 
 def _run_system_keystroke(key_code: int):
@@ -72,10 +74,7 @@ class MouseController:
             if event:
                 CG.CGEventPost(CG.kCGHIDEventTap, event)
         else:
-            if self.is_mouse_down:
-                pyautogui.dragTo(int(cx), int(cy), button='left', _pause=False)
-            else:
-                pyautogui.moveTo(int(cx), int(cy), _pause=False)
+            pyautogui.moveTo(int(cx), int(cy), _pause=False)
 
     def mouse_down(self, x: Optional[float] = None, y: Optional[float] = None):
         """Presses and holds the left mouse button."""
@@ -154,7 +153,6 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
-            # Click 1
             d1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
             CG.CGEventSetIntegerValueField(d1, CG.kCGMouseEventClickState, 1)
@@ -164,7 +162,6 @@ class MouseController:
 
             time.sleep(0.04)
 
-            # Click 2
             d2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
             CG.CGEventSetIntegerValueField(d2, CG.kCGMouseEventClickState, 2)
@@ -220,7 +217,7 @@ class MouseController:
                 scroll_event = CG.CGEventCreateScrollWheelEvent2(
                     None,
                     CG.kCGScrollEventUnitLine,
-                    2,  # 2 wheel axes (vertical, horizontal)
+                    2,
                     int(dy),
                     int(dx),
                     0
@@ -252,8 +249,6 @@ class MouseController:
         subprocess.Popen(["open", "-a", "Mission Control"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # macOS Virtual Keycodes for Zoom
-    # 0x18 = Key '+' / '='
-    # 0x1B = Key '-' / '_'
     KEY_PLUS = 0x18
     KEY_MINUS = 0x1B
 
@@ -284,25 +279,11 @@ class MouseController:
                 pyautogui.hotkey('command', key_char, _pause=False)
                 time.sleep(0.03)
 
-    def trigger_shortcut(self, action: str):
-        """Dispatches keyboard shortcuts reliably on macOS."""
-        scripts = {
-            "ENTER": 'tell application "System Events" to key code 36',                         # Return
-            "NEW_TAB": 'tell application "System Events" to keystroke "t" using command down',  # Cmd + T
-            "CLOSE_TAB": 'tell application "System Events" to keystroke "w" using command down',# Cmd + W
-            "ESCAPE": 'tell application "System Events" to key code 53'                          # Escape
-        }
-        script = scripts.get(action)
-        if script:
-            subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
+    def trigger_shortcut(self, action_id: str):
+        """Dispatches keyboard shortcuts defined in the radial menu system."""
+        execute_radial_action(action_id)
 
     def release_all(self):
         """Safety release for any held mouse buttons."""
         if self.is_mouse_down:
             self.mouse_up()
-
-
-
-

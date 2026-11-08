@@ -1,49 +1,31 @@
 """
-High-Performance Vision Engine with Multi-Hand Detection, Centroid Persistence & Dual-Hand Modifier.
-Implements asynchronous CameraGrabber with single-slot frame buffering,
-MediaPipe Hand Landmarker with num_hands=2, Spatial Hysteresis Centroid Tracking,
-Velocity-Adaptive EMA jitter filtering, Active Interaction ROI, and native macOS Quartz event dispatch.
+Vision Engine for Open FRIDAY: 60 FPS multi-threaded camera acquisition,
+MediaPipe Hand Landmarker tracking, kinematic cursor filtering, and gesture dispatch.
 """
 
-import sys
 import os
-os.environ["GLOG_minloglevel"] = "2"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import time
 import math
-import threading
 import urllib.request
-import re
-from typing import Optional, Tuple, List, Dict, Any
-import numpy as np
+import threading
+from typing import Optional, Tuple, Any
+
 import cv2
+import numpy as np
 import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision
 
-from PyQt6.QtCore import QThread, pyqtSignal, QObject, QBuffer, QIODevice
-from PyQt6.QtGui import QImage, QGuiApplication
-try:
-    from .landmark_smoother import LandmarkSmoother
-    from .one_euro_filter import CursorSmoother, OneEuroFilter
-    from .gesture_recognizer import GestureRecognizer, GestureState, GestureData
-except ImportError:
-    from landmark_smoother import LandmarkSmoother
-    from one_euro_filter import CursorSmoother, OneEuroFilter
-    from gesture_recognizer import GestureRecognizer, GestureState, GestureData
+from PyQt6.QtCore import QThread, pyqtSignal
 
-try:
-    from src.control.mouse_controller import MouseController
-    from src.audio.dictation_engine import VoiceDictationEngine
-    from src.ai_assistant import AIAssistant
-except ImportError:
-    try:
-        from control.mouse_controller import MouseController
-        from audio.dictation_engine import VoiceDictationEngine
-        from ai_assistant import AIAssistant
-    except ImportError:
-        from mouse_controller import MouseController
-        from dictation_engine import VoiceDictationEngine
-        from ai_assistant import AIAssistant
+from src.control.mouse_controller import MouseController
+from src.vision.gesture_recognizer import (
+    GestureRecognizer,
+    GestureState,
+    GestureData,
+)
+from src.vision.landmark_smoother import LandmarkSmoother
+from src.vision.one_euro_filter import CursorSmoother
 
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -74,22 +56,22 @@ class CameraGrabber(threading.Thread):
     def __init__(self, camera_id: int = 0):
         super().__init__(daemon=True)
         self.camera_id = camera_id
-        self.running = False
-        self.latest_frame: Optional[np.ndarray] = None
-        self.frame_lock = threading.Lock()
         self.cap: Optional[cv2.VideoCapture] = None
+        self.latest_frame: Optional[np.ndarray] = None
+        self.lock = threading.Lock()
+        self.running = False
 
     def start_capture(self) -> bool:
         self.cap = cv2.VideoCapture(self.camera_id)
+        if not self.cap.isOpened():
+            print(f"[ERROR] Could not open camera {self.camera_id}")
+            return False
+
+        # Request 60 FPS and 720p resolution
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(0)
-            if not self.cap.isOpened():
-                return False
 
         self.running = True
         self.start()
@@ -99,105 +81,79 @@ class CameraGrabber(threading.Thread):
         while self.running and self.cap and self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret and frame is not None:
-                with self.frame_lock:
+                with self.lock:
                     self.latest_frame = frame
             else:
                 time.sleep(0.005)
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
-        with self.frame_lock:
+        with self.lock:
             if self.latest_frame is not None:
                 return self.latest_frame.copy()
             return None
 
     def stop(self):
         self.running = False
-        if self.cap and self.cap.isOpened():
+        if self.cap:
             self.cap.release()
-
+            self.cap = None
 
 
 class VisionEngine(QThread):
-    """Asynchronous camera capture and dual-hand gesture processing engine with centroid tracking."""
+    """
+    Core Computer Vision Worker Thread.
+    Runs camera capture, MediaPipe HandLandmarker inference, landmark & cursor smoothing,
+    and dispatches native mouse events via MouseController.
+    """
 
-    # Signals for UI communication
-    frame_ready = pyqtSignal(np.ndarray)
     gesture_updated = pyqtSignal(GestureData)
     fps_updated = pyqtSignal(float)
     status_changed = pyqtSignal(str)
-    transcription_completed = pyqtSignal(str)
-    ai_status_changed = pyqtSignal(str)
-    context_image_captured = pyqtSignal(bytes)
-    ai_response_generated = pyqtSignal(str)
-    annotations_generated = pyqtSignal(list)
 
     def __init__(
         self,
         camera_id: int = 0,
         mouse_controller: Optional[MouseController] = None,
-        model_type: str = "openai",
-        model_id: str = "gpt-4o",
-        parent: Optional[QObject] = None,
+        model_path: Optional[str] = None,
     ):
-        super().__init__(parent)
+        super().__init__()
         self.camera_id = camera_id
         self.mouse_controller = mouse_controller or MouseController()
-        self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
-        self.gesture_recognizer = GestureRecognizer()
-        
-        # Local Voice Dictation Engine (faster-whisper) & OpenAI AI Assistant
-        self.dictation_engine = VoiceDictationEngine(model_size="base.en")
-        self.ai_assistant = AIAssistant(model_type=model_type, model_id=model_id)
-        self.ai_assistant.on_annotations_generated = lambda anns: self.annotations_generated.emit(anns)
-        self.ai_assistant.signals.annotations_ready.connect(
-            lambda anns, spoken: self.annotations_generated.emit(anns)
-        )
-        self.is_dictating = False
-        self.current_dictation_mode: str = "CLIPBOARD"
-        
-        # One-Euro Dynamic Cursor Smoothing (min_cutoff=1.2, beta=0.015, d_cutoff=1.0)
-        self.pointer_smoothing = 1.2
-        self.pointer_beta = 0.015
-        self.cursor_smoother = CursorSmoother(min_cutoff=1.2, beta=0.015, d_cutoff=1.0)
-        self.filter = self.cursor_smoother
 
-        # Operational Flags
-        self.running = False
+        if model_path is None:
+            self.model_path = ensure_model_file()
+        else:
+            self.model_path = model_path
+
+        # Sub-modules
+        self.gesture_recognizer = GestureRecognizer()
+        self.landmark_smoother = LandmarkSmoother(alpha_slow=0.35, alpha_fast=0.88)
+        self.cursor_smoother = CursorSmoother(min_cutoff=0.2, beta=0.003)
+
+        # Operational Settings
         self.tracking_enabled = True
         self.mouse_control_enabled = True
         self.mirror_horizontal = True
+        self.running = False
 
-        # Active Interaction Region (ROI: Inset 18% from webcam borders)
-        self.roi_x_min = 0.18
-        self.roi_x_max = 0.82
-        self.roi_y_min = 0.18
-        self.roi_y_max = 0.82
-
-        # Screen dimensions
-        self.screen_width, self.screen_height = self.mouse_controller.get_screen_size()
+        # Screen Coordinate Mapping (with margin inset)
+        self.screen_width = float(self.mouse_controller.screen_width)
+        self.screen_height = float(self.mouse_controller.screen_height)
         self.gesture_recognizer.set_screen_dimensions(self.screen_width, self.screen_height)
 
-        # Previous state memory & Centroid Persistence
-        self.prev_state = GestureState.NONE
+        self.margin_x = 0.16
+        self.margin_y = 0.16
+
+        # State tracking
         self.was_dragging = False
         self.last_zoom_time: float = 0.0
+
+        # Centroid persistence for dual-hand classification
         self.prev_dominant_centroid: Optional[Tuple[float, float]] = None
         self.prev_modifier_centroid: Optional[Tuple[float, float]] = None
-        self.frame_counter = 0
-
-        # Model path
-        self.model_path = ensure_model_file()
-        self.grabber: Optional[CameraGrabber] = None
-
 
     def update_settings(self, settings: dict):
-        """Dynamically updates vision and control parameters from GUI settings."""
-        if "camera_id" in settings and settings["camera_id"] != self.camera_id:
-            self.camera_id = int(settings["camera_id"])
-            if self.grabber:
-                self.grabber.stop()
-                self.grabber = CameraGrabber(self.camera_id)
-                self.grabber.start_capture()
+        """Applies dynamic runtime configuration updates."""
         if "tracking_enabled" in settings:
             self.tracking_enabled = bool(settings["tracking_enabled"])
         if "mouse_control_enabled" in settings:
@@ -205,93 +161,60 @@ class VisionEngine(QThread):
         if "mirror_horizontal" in settings:
             self.mirror_horizontal = bool(settings["mirror_horizontal"])
         if "margin_x" in settings:
-            margin = float(settings["margin_x"])
-            self.roi_x_min = margin
-            self.roi_x_max = 1.0 - margin
+            self.margin_x = float(settings["margin_x"])
         if "margin_y" in settings:
-            margin = float(settings["margin_y"])
-            self.roi_y_min = margin
-            self.roi_y_max = 1.0 - margin
-        if "smoothing" in settings or "min_cutoff" in settings:
-            cutoff = float(settings.get("smoothing", settings.get("min_cutoff", self.pointer_smoothing)))
-            self.pointer_smoothing = cutoff
-            self.cursor_smoother.update_params(cutoff, self.pointer_beta)
-        if "responsiveness" in settings or "beta" in settings:
-            beta = float(settings.get("responsiveness", settings.get("beta", self.pointer_beta)))
-            self.pointer_beta = beta
-            self.cursor_smoother.update_params(self.pointer_smoothing, beta)
-        if "pinch_threshold" in settings:
-            self.gesture_recognizer.pinch_start_threshold = float(settings["pinch_threshold"])
-            self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_threshold"]) + 0.14
+            self.margin_y = float(settings["margin_y"])
         if "scroll_sensitivity" in settings:
             self.gesture_recognizer.scroll_sensitivity = float(settings["scroll_sensitivity"])
-        if "model_type" in settings or "model_id" in settings:
-            model_type = settings.get("model_type", getattr(self.ai_assistant, "model_type", "openai"))
-            model_id = settings.get("model_id", getattr(self.ai_assistant, "model_id", "gpt-4o"))
-            self.ai_assistant.model_type = model_type
-            self.ai_assistant.model_id = model_id
-            self.ai_assistant.computer_use_model = model_id
-            self.ai_assistant.agent_model = model_id
-            if hasattr(self.ai_assistant, "computer_agent"):
-                self.ai_assistant.computer_agent.model_id = model_id
+
+        min_cutoff = settings.get("min_cutoff", 0.2)
+        beta = settings.get("beta", 0.003)
+        self.cursor_smoother = CursorSmoother(min_cutoff=min_cutoff, beta=beta)
 
     def dismiss_radial_menu(self):
-        """Dismisses the radial menu modal state."""
+        """Manually dismisses the radial shortcut wheel."""
         self.gesture_recognizer.dismiss_radial_menu()
 
     def stop(self):
-        """Stops the vision thread safely."""
+        """Signals vision loop to stop and waits for thread completion."""
         self.running = False
-        if self.is_dictating:
-            self.is_dictating = False
-            self.dictation_engine.stop_and_transcribe()
-        if self.grabber:
-            self.grabber.stop()
-        self.wait(2000)
-
+        self.wait(1500)
 
     def _map_to_screen(self, norm_x: float, norm_y: float) -> Tuple[float, float]:
-        """
-        Maps normalized camera coordinates within Active Interaction ROI to full screen resolution
-        using linear interpolation and boundary clamping (np.interp / np.clip).
-        """
-        sx = float(np.interp(norm_x, [self.roi_x_min, self.roi_x_max], [0, self.screen_width]))
-        sy = float(np.interp(norm_y, [self.roi_y_min, self.roi_y_max], [0, self.screen_height]))
-        sx = float(np.clip(sx, 0, self.screen_width - 1))
-        sy = float(np.clip(sy, 0, self.screen_height - 1))
+        """Maps normalized landmark coordinates [0, 1] to screen dimensions with margin inset."""
+        clamped_x = (norm_x - self.margin_x) / max(1.0 - 2 * self.margin_x, 0.01)
+        clamped_y = (norm_y - self.margin_y) / max(1.0 - 2 * self.margin_y, 0.01)
+        sx = max(0.0, min(1.0, clamped_x)) * self.screen_width
+        sy = max(0.0, min(1.0, clamped_y)) * self.screen_height
         return sx, sy
 
-    def _init_landmarker(self):
-        """Initializes MediaPipe HandLandmarker with explicit CPU delegate for zero Metal crashes."""
-        from mediapipe.tasks import python
-        from mediapipe.tasks.python import vision
-
-        base_options = python.BaseOptions(
-            model_asset_path=self.model_path,
-            delegate=python.BaseOptions.Delegate.CPU
-        )
+    def _init_landmarker(self) -> vision.HandLandmarker:
+        """Initializes the MediaPipe HandLandmarker in IMAGE mode."""
+        base_options = mp_python.BaseOptions(model_asset_path=self.model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
             running_mode=vision.RunningMode.IMAGE,
             num_hands=2,
-            min_hand_detection_confidence=0.60,
-            min_hand_presence_confidence=0.60,
-            min_tracking_confidence=0.60,
+            min_hand_detection_confidence=0.55,
+            min_hand_presence_confidence=0.55,
+            min_tracking_confidence=0.55,
         )
         return vision.HandLandmarker.create_from_options(options)
 
     def _compute_palm_centroid(self, hand_landmarks) -> Tuple[float, float]:
         """Computes stable palm centroid from Wrist(0), IndexMCP(5), MiddleMCP(9), PinkyMCP(17)."""
-        cx = (hand_landmarks[0].x + hand_landmarks[5].x + hand_landmarks[9].x + hand_landmarks[17].x) * 0.25
-        cy = (hand_landmarks[0].y + hand_landmarks[5].y + hand_landmarks[9].y + hand_landmarks[17].y) * 0.25
+        hl = hand_landmarks
+        def get_xy(p):
+            return (p.x, p.y) if hasattr(p, 'x') else (p[0], p[1])
+        p0, p5, p9, p17 = get_xy(hl[0]), get_xy(hl[5]), get_xy(hl[9]), get_xy(hl[17])
+        cx = (p0[0] + p5[0] + p9[0] + p17[0]) * 0.25
+        cy = (p0[1] + p5[1] + p9[1] + p17[1]) * 0.25
         return cx, cy
 
     def _classify_hands(self, hands_landmarks, handedness) -> Tuple[Optional[Any], Optional[Any]]:
         """
-        Classifies detected hands into Right Hand (Dominant) and Left Hand (Modifier/PTT)
-        using Spatial Hysteresis & Centroid Tracking.
-        Returns:
-            (right_hand_landmarks, left_hand_landmarks)
+        Classifies detected hands into Right Hand (Dominant) and Left Hand (Modifier).
+        Returns: (right_hand_landmarks, left_hand_landmarks)
         """
         hands_count = len(hands_landmarks)
         if hands_count == 0:
@@ -299,9 +222,6 @@ class VisionEngine(QThread):
             self.prev_modifier_centroid = None
             return None, None
 
-        # MediaPipe handedness in mirrored camera frame:
-        # Category "Left" in mirrored image corresponds to user's Physical Right Hand.
-        # Category "Right" in mirrored image corresponds to user's Physical Left Hand.
         target_right_label = "Left" if self.mirror_horizontal else "Right"
         target_left_label = "Right" if self.mirror_horizontal else "Left"
 
@@ -315,8 +235,6 @@ class VisionEngine(QThread):
                     label = getattr(h_class[0], "label", getattr(h_class[0], "category_name", ""))
                     if label == target_left_label:
                         is_left = True
-                    elif label == target_right_label:
-                        is_left = False
 
             if is_left:
                 self.prev_modifier_centroid = centroids[0]
@@ -327,21 +245,16 @@ class VisionEngine(QThread):
                 self.prev_modifier_centroid = None
                 return hands_landmarks[0], None
 
-        # Two or more hands in view:
-        # Check persistent centroids if available
+        # Two or more hands in view: match against persistent centroids if available
         if self.prev_dominant_centroid is not None and self.prev_modifier_centroid is not None:
             d0_right = math.hypot(centroids[0][0] - self.prev_dominant_centroid[0], centroids[0][1] - self.prev_dominant_centroid[1])
             d1_right = math.hypot(centroids[1][0] - self.prev_dominant_centroid[0], centroids[1][1] - self.prev_dominant_centroid[1])
-
             if d0_right < d1_right:
-                right_idx = 0
-                left_idx = 1
+                right_idx, left_idx = 0, 1
             else:
-                right_idx = 1
-                left_idx = 0
+                right_idx, left_idx = 1, 0
         else:
-            right_idx = None
-            left_idx = None
+            right_idx, left_idx = None, None
             if handedness and len(handedness) >= 2:
                 for idx, h_info in enumerate(handedness[:2]):
                     h_class = getattr(h_info, "classification", h_info)
@@ -353,13 +266,10 @@ class VisionEngine(QThread):
                             left_idx = idx
 
             if right_idx is None or left_idx is None or right_idx == left_idx:
-                # Fallback: In mirrored frame, user's physical right hand is on right side (greater X)
                 if centroids[0][0] > centroids[1][0]:
-                    right_idx = 0
-                    left_idx = 1
+                    right_idx, left_idx = 0, 1
                 else:
-                    right_idx = 1
-                    left_idx = 0
+                    right_idx, left_idx = 1, 0
 
         # Update persistent centroids with EMA smoothing
         alpha = 0.65
@@ -374,58 +284,8 @@ class VisionEngine(QThread):
 
         return hands_landmarks[right_idx], hands_landmarks[left_idx]
 
-    def _on_ai_status_change(self, status: str):
-        """Callback when AI Assistant changes status (THINKING, SPEAKING, CONTROLLING, IDLE)."""
-        self.ai_status_changed.emit(status)
-
-    def _on_ai_reply_generated(self, reply: str):
-        """Callback when AI Assistant generates final text response."""
-        self.ai_response_generated.emit(reply)
-
-    def _on_unified_transcription_complete(self, text: str):
-        """
-        Unified transcript intent classification router:
-        Checks if speech begins with or contains 'friday' wake-word.
-        If 'Friday' detected:
-            - Strip 'Friday' from utterance.
-            - If query is empty, reply "I'm listening."
-            - Else, send query to AIAssistant.
-        If 'Friday' not detected:
-            - Inject text directly into active search bar / text field via clipboard paste.
-        """
-        if not text or not text.strip():
-            self.transcription_completed.emit("")
-            return
-
-        raw_text = text.strip()
-        self.transcription_completed.emit(raw_text)
-
-        # Regex for "Friday" or "Hey Friday", e.g. "^(hey\s+)?friday[,\s:!-.]*(.*)$"
-        pattern = r'^(?:hey\s+)?friday[,\s:!-.]*(.*)$'
-        match = re.search(pattern, raw_text, re.IGNORECASE)
-
-        if match:
-            query_prompt = match.group(1).strip()
-            print(f"[WAKE WORD] 'Friday' wake-word detected in utterance: '{raw_text}' -> Query: '{query_prompt}'")
-            if not query_prompt:
-                ack_msg = "I'm listening."
-                self._on_ai_status_change("SPEAKING")
-                self._on_ai_reply_generated(ack_msg)
-                self.ai_assistant._speak(ack_msg)
-                self._on_ai_status_change("IDLE")
-            else:
-                self.ai_assistant.query(
-                    query_prompt,
-                    on_status_change=self._on_ai_status_change,
-                    on_reply_generated=self._on_ai_reply_generated,
-                    on_annotations_generated=lambda anns: self.annotations_generated.emit(anns),
-                )
-        else:
-            print(f"[DICTATION] Routing text to desktop dictation: '{raw_text}'")
-            self.dictation_engine._inject_text(raw_text)
-
     def run(self):
-        """Main vision processing loop with multi-hand classification and centroid persistence."""
+        """Main vision loop: continuous camera acquisition, inference, and mouse event dispatch."""
         self.running = True
         self.status_changed.emit("Initializing Camera...")
 
@@ -465,206 +325,106 @@ class VisionEngine(QThread):
                 if self.mirror_horizontal:
                     frame = cv2.flip(frame, 1)
 
-                h, w, _ = frame.shape
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                gesture_data = GestureData(
-                    is_tracking=False,
-                    fps=fps_smoothing,
-                    status_message="Searching for hand...",
-                    is_modifier_active=False,
-                )
+                if not self.tracking_enabled:
+                    time.sleep(0.02)
+                    continue
 
-                if self.tracking_enabled:
-                    # Inference Downsampling: 640x360 cuts inference CPU compute in half
-                    infer_frame = cv2.resize(rgb_frame, (640, 360), interpolation=cv2.INTER_LINEAR)
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=infer_frame)
-                    result = landmarker.detect(mp_image)
+                # Inference Downsampling: 640x360 cuts inference CPU compute in half
+                infer_frame = cv2.resize(rgb_frame, (640, 360), interpolation=cv2.INTER_LINEAR)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=infer_frame)
+                result = landmarker.detect(mp_image)
 
-                    right_hand_landmarks = None
-                    left_hand_landmarks = None
+                right_hand_landmarks = None
+                left_hand_landmarks = None
 
-                    if result.hand_landmarks and len(result.hand_landmarks) > 0:
-                        right_hand_landmarks, left_hand_landmarks = self._classify_hands(
-                            result.hand_landmarks, getattr(result, "handedness", None)
+                if result.hand_landmarks and len(result.hand_landmarks) > 0:
+                    right_hand_landmarks, left_hand_landmarks = self._classify_hands(
+                        result.hand_landmarks, getattr(result, "handedness", None)
+                    )
+
+                if right_hand_landmarks is not None:
+                    # Apply Landmark Pre-Smoothing on Right Hand
+                    smoothed_landmarks = self.landmark_smoother.smooth(right_hand_landmarks)
+
+                    # Extract stable pointer coordinates from Right Index MCP (Landmark 5)
+                    raw_x, raw_y = self.gesture_recognizer.get_stable_pointer_coords(smoothed_landmarks)
+                    unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
+
+                    # Apply One-Euro dynamic smoothing to cursor coordinates
+                    cursor_x, cursor_y = self.cursor_smoother.smooth(unfiltered_sx, unfiltered_sy)
+
+                    # Check for Dual-Hand Pinch Spatial Zoom
+                    zoom_delta = 0.0
+                    if left_hand_landmarks is not None:
+                        left_is_pinched = self.gesture_recognizer.is_hand_pinched(left_hand_landmarks)
+                        right_is_pinched = self.gesture_recognizer.is_hand_pinched(smoothed_landmarks)
+                        zoom_delta = self.gesture_recognizer.process_dual_hand_zoom(
+                            left_hand_landmarks,
+                            smoothed_landmarks,
+                            left_is_pinched,
+                            right_is_pinched,
                         )
 
-                    # GATING: When AI is actively controlling desktop, suppress normal mouse actions
-                    if self.ai_assistant.is_controlling_desktop:
+                    if self.gesture_recognizer.dual_pinch_active:
                         if self.was_dragging:
                             self.mouse_controller.mouse_up()
                             self.was_dragging = False
 
-                        # Abort Gesture: Crossed Hands, Wrists, or Fingers ('X' Shape)
-                        if self.gesture_recognizer.is_crossed_abort_gesture(right_hand_landmarks, left_hand_landmarks):
-                            print("[VISION] Abort gesture (Crossed Hands / 'X' Shape) detected during computer control!")
-                            self.ai_assistant.abort_computer_agent()
-                            gesture_data = GestureData(
-                                is_tracking=True,
-                                fps=fps_smoothing,
-                                status_message="● Aborting Desktop Control...",
-                                is_modifier_active=True,
-                            )
-                            self.gesture_updated.emit(gesture_data)
-                            self.fps_updated.emit(fps_smoothing)
-                            continue
-
-                        gesture_data = GestureData(
-                            is_tracking=(right_hand_landmarks is not None or left_hand_landmarks is not None),
-                            fps=fps_smoothing,
-                            status_message="● CONTROLLING DESKTOP (Cross hands to abort)",
-                            is_modifier_active=False,
-                        )
-                        self.gesture_updated.emit(gesture_data)
-                        self.fps_updated.emit(fps_smoothing)
-                        continue
-
-                    if right_hand_landmarks is not None:
-                        # Apply Landmark Pre-Smoothing on Right Hand only
-                        smoothed_landmarks = self.landmark_smoother.smooth(right_hand_landmarks)
-
-                        # Extract stable pointer coordinates directly from Right Index MCP (Landmark 5)
-                        raw_x, raw_y = self.gesture_recognizer.get_stable_pointer_coords(smoothed_landmarks)
-
-                        unfiltered_sx, unfiltered_sy = self._map_to_screen(raw_x, raw_y)
-
-                        # Apply One-Euro dynamic smoothing strictly to cursor coordinates
-                        cursor_x, cursor_y = self.cursor_smoother.smooth(unfiltered_sx, unfiltered_sy)
-                        screen_x, screen_y = cursor_x, cursor_y
-
-                        # Check for Dual-Hand Pinch Spatial Zoom
-                        zoom_delta = 0.0
-                        if left_hand_landmarks is not None:
-                            left_is_pinched = self.gesture_recognizer.is_hand_pinched(left_hand_landmarks)
-                            right_is_pinched = self.gesture_recognizer.is_hand_pinched(smoothed_landmarks)
-                            zoom_delta = self.gesture_recognizer.process_dual_hand_zoom(
-                                left_hand_landmarks,
-                                smoothed_landmarks,
-                                left_is_pinched,
-                                right_is_pinched,
-                            )
-
-                        if self.gesture_recognizer.dual_pinch_active:
-                            gesture_state = GestureState.ZOOM
-                            pinch_progress = 1.0
-                            scroll_dy = 0
-                            nav_action = None
-                            radial_sector = None
-                            snip_box = None
-                            effective_pos = (cursor_x, cursor_y)
-
-                            if self.was_dragging:
-                                self.mouse_controller.mouse_up()
-                                self.was_dragging = False
-
-                            if zoom_delta != 0.0 and self.mouse_control_enabled:
-                                if now - self.last_zoom_time >= 0.06:
-                                    if zoom_delta > 0:
-                                        self.mouse_controller.zoom("in", steps=1)
-                                        status_msg = "ZOOM IN"
-                                    else:
-                                        self.mouse_controller.zoom("out", steps=1)
-                                        status_msg = "ZOOM OUT"
-                                    self.last_zoom_time = now
+                        zoom_status = "ZOOM"
+                        if zoom_delta != 0.0 and self.mouse_control_enabled:
+                            if now - self.last_zoom_time >= 0.06:
+                                if zoom_delta > 0:
+                                    self.mouse_controller.zoom("in", steps=1)
+                                    zoom_status = "ZOOM IN"
                                 else:
-                                    status_msg = "ZOOM IN" if zoom_delta > 0 else "ZOOM OUT"
+                                    self.mouse_controller.zoom("out", steps=1)
+                                    zoom_status = "ZOOM OUT"
+                                self.last_zoom_time = now
                             else:
-                                status_msg = "ZOOM"
-                        else:
-                            gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
-                                smoothed_landmarks,
-                                (cursor_x, cursor_y),
-                                left_landmarks=left_hand_landmarks,
-                                now=now,
-                            )
-
-                            if self.mouse_control_enabled:
-                                self._handle_mouse_events(gesture_state, cursor_x, cursor_y, scroll_dy, nav_action)
+                                zoom_status = "ZOOM IN" if zoom_delta > 0 else "ZOOM OUT"
 
                         gesture_data = GestureData(
                             raw_x=raw_x,
                             raw_y=raw_y,
-                            screen_x=screen_x,
-                            screen_y=screen_y,
-                            state=gesture_state,
-                            pinch_progress=pinch_progress,
-                            scroll_dy=scroll_dy,
+                            screen_x=cursor_x,
+                            screen_y=cursor_y,
+                            state=GestureState.ZOOM,
+                            pinch_progress=1.0,
                             hand_landmarks=smoothed_landmarks,
                             is_tracking=True,
-                            confidence=0.95,
                             fps=fps_smoothing,
-                            status_message=status_msg,
-                            is_modifier_active=(left_hand_landmarks is not None),
-                            nav_action=nav_action,
-                            radial_sector=radial_sector,
-                            snip_box=snip_box,
+                            status_message=zoom_status,
+                            is_modifier_active=True,
                         )
                     else:
-                        # Right hand not in frame:
-                        self.landmark_smoother.reset()
-                        self.cursor_smoother.reset()
-                        if self.was_dragging:
-                            self.mouse_controller.mouse_up()
-                            self.was_dragging = False
-
-                        gesture_state, pinch_progress, scroll_dy, status_msg, effective_pos, nav_action, radial_sector, snip_box = self.gesture_recognizer.process(
-                            None,
-                            (0.0, 0.0),
+                        gesture_data = self.gesture_recognizer.process(
+                            smoothed_landmarks,
+                            (cursor_x, cursor_y),
                             left_landmarks=left_hand_landmarks,
                             now=now,
                         )
+                        gesture_data.raw_x = raw_x
+                        gesture_data.raw_y = raw_y
+                        gesture_data.fps = fps_smoothing
 
-                        gesture_data = GestureData(
-                            raw_x=0.0,
-                            raw_y=0.0,
-                            screen_x=0.0,
-                            screen_y=0.0,
-                            state=gesture_state,
-                            pinch_progress=0.0,
-                            scroll_dy=0,
-                            hand_landmarks=None,
-                            is_tracking=False,
-                            confidence=0.0,
-                            fps=fps_smoothing,
-                            status_message=status_msg,
-                            is_modifier_active=(left_hand_landmarks is not None),
-                            nav_action=nav_action,
-                            radial_sector=radial_sector,
-                            snip_box=snip_box,
-                        )
+                        if self.mouse_control_enabled:
+                            self._handle_mouse_events(gesture_data)
+                else:
+                    self.landmark_smoother.reset()
+                    self.cursor_smoother.reset()
+                    if self.was_dragging:
+                        self.mouse_controller.mouse_up()
+                        self.was_dragging = False
 
-                    # Handle Screen Snippet Capture on SNIP_RELEASE
-                    if gesture_state == GestureState.SNIP_RELEASE and snip_box is not None:
-                        x1, y1, x2, y2 = snip_box
-                        rx = min(x1, x2)
-                        ry = min(y1, y2)
-                        rw = abs(x2 - x1)
-                        rh = abs(y2 - y1)
-                        if rw > 20 and rh > 20:
-                            try:
-                                from PIL import ImageGrab
-                                import io
-                                shot = ImageGrab.grab(bbox=(int(rx), int(ry), int(rx + rw), int(ry + rh)))
-                                buf = io.BytesIO()
-                                shot.save(buf, format="PNG")
-                                img_bytes = buf.getvalue()
-                                self.ai_assistant.set_context_image(img_bytes)
-                                self.context_image_captured.emit(img_bytes)
-                            except Exception as grab_err:
-                                print(f"[SNIP CAPTURE ERROR] Thread-safe screen grab failed: {grab_err}")
-
-                    # Handle Push-to-Talk Voice Dictation & Wake-Word Routing
-                    if gesture_state == GestureState.LISTENING:
-                        if not self.is_dictating:
-                            self.is_dictating = True
-                            self.dictation_engine.start_recording()
-                    else:
-                        if self.is_dictating:
-                            self.is_dictating = False
-                            self.dictation_engine.stop_and_transcribe(
-                                on_complete_callback=self._on_unified_transcription_complete,
-                                inject_clipboard=False
-                            )
+                    gesture_data = self.gesture_recognizer.process(
+                        None,
+                        (0.0, 0.0),
+                        left_landmarks=left_hand_landmarks,
+                        now=now,
+                    )
+                    gesture_data.fps = fps_smoothing
 
                 self.gesture_updated.emit(gesture_data)
                 self.fps_updated.emit(fps_smoothing)
@@ -677,62 +437,38 @@ class VisionEngine(QThread):
             except Exception:
                 pass
 
-            if self.is_dictating:
-                self.is_dictating = False
-                try:
-                    self.dictation_engine.stop_and_transcribe()
-                except Exception:
-                    pass
-
             if hasattr(self, 'grabber') and self.grabber:
                 self.grabber.stop()
             self.mouse_controller.release_all()
             self.status_changed.emit("Tracking Stopped")
 
-    def _handle_mouse_events(
-        self,
-        state: GestureState,
-        screen_x: float,
-        screen_y: float,
-        scroll_dy: int,
-        nav_action: Optional[str] = None,
-    ):
-        """Executes native mouse actions according to gesture state machine while maintaining continuous tracking."""
+    def _handle_mouse_events(self, data: GestureData):
+        """Executes native mouse actions according to gesture state."""
+        state = data.state
+        screen_x = data.screen_x
+        screen_y = data.screen_y
+        scroll_dy = data.scroll_dy
+        nav_action = data.nav_action
+
         if state == GestureState.NONE:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
             return
 
-        # Continuous cursor movement across all navigation, gestures, and active states
-        # (Only freeze when speaking / listening / transcribing)
-        if state not in (GestureState.LISTENING, GestureState.TRANSCRIBING, GestureState.AI_LISTENING):
-            self.mouse_controller.move_to(screen_x, screen_y)
-
-        # Snipping Mode (Freeze mouse drag and clicks during snip selection)
-        if state in (GestureState.SNIP_DRAG, GestureState.SNIP_RELEASE):
-            if self.was_dragging:
-                self.mouse_controller.mouse_up()
-                self.was_dragging = False
-            return
-
-        # Voice Dictation & AI Assistant (Freeze mouse drag and clicks during voice)
-        if state in (GestureState.LISTENING, GestureState.TRANSCRIBING, GestureState.AI_LISTENING):
-            if self.was_dragging:
-                self.mouse_controller.mouse_up()
-                self.was_dragging = False
-            return
+        # Continuous cursor movement across navigation
+        self.mouse_controller.move_to(screen_x, screen_y)
 
         # Radial Shortcut Menu (Execute triggered shortcut)
         if state == GestureState.RADIAL_MENU:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
                 self.was_dragging = False
-            if nav_action in ("ENTER", "NEW_TAB", "CLOSE_TAB", "ESCAPE"):
+            if nav_action:
                 self.mouse_controller.trigger_shortcut(nav_action)
             return
 
-        # 3-Finger Spatial Navigation (Execute spaces / mission control)
+        # 3-Finger Spatial Navigation (Spaces / Mission Control)
         if state == GestureState.SWIPE_NAV:
             if self.was_dragging:
                 self.mouse_controller.mouse_up()
@@ -758,14 +494,9 @@ class VisionEngine(QThread):
         # Click actions
         if state == GestureState.CLICK:
             self.mouse_controller.click(screen_x, screen_y)
-
         elif state == GestureState.DOUBLE_CLICK:
             self.mouse_controller.double_click(screen_x, screen_y)
-
         elif state == GestureState.RIGHT_CLICK:
             self.mouse_controller.right_click(screen_x, screen_y)
-
         elif state == GestureState.SCROLLING and scroll_dy != 0:
             self.mouse_controller.scroll(scroll_dy, 0, screen_x, screen_y)
-
-
