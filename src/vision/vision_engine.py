@@ -127,7 +127,7 @@ class VisionEngine(QThread):
 
         # Sub-modules
         self.gesture_recognizer = GestureRecognizer()
-        self.landmark_smoother = LandmarkSmoother(alpha_slow=0.35, alpha_fast=0.88)
+        self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
         self.cursor_smoother = CursorSmoother(min_cutoff=0.2, beta=0.003)
 
         # Operational Settings
@@ -452,26 +452,14 @@ class VisionEngine(QThread):
 
         if state == GestureState.NONE:
             if self.was_dragging:
-                self.mouse_controller.mouse_up()
+                self.mouse_controller.mouse_up(screen_x, screen_y)
                 self.was_dragging = False
             return
 
-        # Continuous cursor movement across navigation
-        self.mouse_controller.move_to(screen_x, screen_y)
-
-        # Radial Shortcut Menu (Execute triggered shortcut)
-        if state == GestureState.RADIAL_MENU:
-            if self.was_dragging:
-                self.mouse_controller.mouse_up()
-                self.was_dragging = False
-            if nav_action:
-                self.mouse_controller.trigger_shortcut(nav_action)
-            return
-
-        # 3-Finger Spatial Navigation (Spaces / Mission Control)
+        # 1. 3-Finger Spatial Navigation (Spaces / Mission Control / App Exposé)
         if state == GestureState.SWIPE_NAV:
             if self.was_dragging:
-                self.mouse_controller.mouse_up()
+                self.mouse_controller.mouse_up(screen_x, screen_y)
                 self.was_dragging = False
             if nav_action == "SPACE_RIGHT":
                 self.mouse_controller.switch_space_right()
@@ -479,19 +467,38 @@ class VisionEngine(QThread):
                 self.mouse_controller.switch_space_left()
             elif nav_action == "MISSION_CONTROL":
                 self.mouse_controller.trigger_mission_control()
+            elif nav_action == "APP_EXPOSE":
+                self.mouse_controller.trigger_app_expose()
             return
 
-        # Dragging state
+        # 2. Radial Shortcut Menu (Execute triggered shortcut)
+        if state == GestureState.RADIAL_MENU:
+            if self.was_dragging:
+                self.mouse_controller.mouse_up(screen_x, screen_y)
+                self.was_dragging = False
+            if nav_action:
+                self.mouse_controller.trigger_shortcut(nav_action)
+            return
+
+        # 3. Dragging state (Instant seamless drag from origin without time delay)
         if state == GestureState.DRAGGING:
             if not self.was_dragging:
-                self.mouse_controller.mouse_down(screen_x, screen_y)
+                origin_x = data.drag_start_x if data.drag_start_x > 0 else screen_x
+                origin_y = data.drag_start_y if data.drag_start_y > 0 else screen_y
+                self.mouse_controller.move_to(origin_x, origin_y)
+                self.mouse_controller.mouse_down(origin_x, origin_y)
                 self.was_dragging = True
+            self.mouse_controller.move_to(screen_x, screen_y)
+            return
         else:
             if self.was_dragging:
                 self.mouse_controller.mouse_up(screen_x, screen_y)
                 self.was_dragging = False
 
-        # Click actions
+        # 4. Standard Pointer Movement
+        self.mouse_controller.move_to(screen_x, screen_y)
+
+        # 5. Click actions
         if state == GestureState.CLICK:
             self.mouse_controller.click(screen_x, screen_y)
         elif state == GestureState.DOUBLE_CLICK:

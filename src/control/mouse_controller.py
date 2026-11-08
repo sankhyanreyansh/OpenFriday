@@ -245,8 +245,12 @@ class MouseController:
         threading.Thread(target=_run_system_keystroke, args=(124,), daemon=True).start()
 
     def trigger_mission_control(self):
-        """Triggers Mission Control directly via macOS launch services."""
-        subprocess.Popen(["open", "-a", "Mission Control"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        """Triggers Mission Control (Control + Up Arrow)."""
+        threading.Thread(target=_run_system_keystroke, args=(126,), daemon=True).start()
+
+    def trigger_app_expose(self):
+        """Triggers Application Windows / App Exposé (Control + Down Arrow)."""
+        threading.Thread(target=_run_system_keystroke, args=(125,), daemon=True).start()
 
     # macOS Virtual Keycodes for Zoom
     KEY_PLUS = 0x18

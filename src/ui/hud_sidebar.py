@@ -169,10 +169,14 @@ class GlassmorphicStatusPill(QWidget):
         elif state == GestureState.SWIPE_NAV:
             if data.nav_action == "MISSION_CONTROL":
                 display_text = "● MISSION CONTROL"
-            elif data.nav_action in ("SPACE_LEFT", "SPACE_RIGHT"):
-                display_text = "● SPACES"
+            elif data.nav_action == "APP_EXPOSE":
+                display_text = "● APP EXPOSÉ"
+            elif data.nav_action == "SPACE_LEFT":
+                display_text = "● SPACE LEFT"
+            elif data.nav_action == "SPACE_RIGHT":
+                display_text = "● SPACE RIGHT"
             else:
-                display_text = "● SWIPE NAV"
+                display_text = "● 3-FINGER SWIPE"
         elif data.is_modifier_active:
             display_text = f"● [SHIFT] {state_text}"
         else:

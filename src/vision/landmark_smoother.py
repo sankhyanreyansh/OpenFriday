@@ -28,7 +28,15 @@ class LandmarkSmoother:
     - High-speed motion: Lower smoothing factor (alpha ~ 0.85) ensures zero tracking latency.
     """
 
-    def __init__(self, base_alpha: float = 0.45, speed_coeff: float = 8.0, num_landmarks: int = 21):
+    def __init__(
+        self,
+        base_alpha: float = 0.45,
+        speed_coeff: float = 8.0,
+        num_landmarks: int = 21,
+        **kwargs,
+    ):
+        if "alpha_slow" in kwargs:
+            base_alpha = kwargs["alpha_slow"]
         self.base_alpha = float(base_alpha)
         self.speed_coeff = float(speed_coeff)
         self.num_landmarks = num_landmarks

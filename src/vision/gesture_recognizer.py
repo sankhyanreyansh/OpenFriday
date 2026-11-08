@@ -5,7 +5,11 @@ Dual-Hand Modifier Gesture Recognition Engine for Open FRIDAY.
 - Dual Hand Gestures:
     - Dual Open Palms (Hold 250ms): Summons customizable Radial Shortcut Menu.
     - Dual Pinch: Pinch-to-Zoom (zoom in / zoom out).
-- Three-finger Swipes: Mission Control (Up) and Desktop Spaces (Left / Right).
+- Three-finger Swipes:
+    - Swipe Left: Next Desktop Space
+    - Swipe Right: Previous Desktop Space
+    - Swipe Up: Mission Control
+    - Swipe Down: App Exposé / Application Windows
 - Two-finger Scroll: Inertial momentum decay scrolling.
 """
 
@@ -50,6 +54,8 @@ class GestureData:
     is_modifier_active: bool = False
     nav_action: Optional[str] = None
     radial_sector: Optional[str] = None
+    drag_start_x: float = 0.0
+    drag_start_y: float = 0.0
 
 
 class GestureRecognizer:
@@ -88,9 +94,8 @@ class GestureRecognizer:
         self.pinch_release_threshold = 0.54
 
         # Timing and travel thresholds
-        self.tap_max_time = 0.25          # Tap duration < 250ms
-        self.drag_time_threshold = 0.45   # Hold delay before drag engages (450ms)
-        self.drag_dist_threshold = 35.0   # Travel required before drag engages (35px)
+        self.tap_max_time = 0.35          # Tap duration < 350ms
+        self.drag_dist_threshold = 12.0   # Crisp 12px spatial travel threshold (Zero time delay)
         self.double_click_window = 0.40   # Double-tap window (400ms)
 
         # State tracking
@@ -119,7 +124,7 @@ class GestureRecognizer:
         # Three-finger space navigation
         self.three_finger_history: List[Tuple[float, float, float]] = []
         self.last_swipe_time: float = 0.0
-        self.swipe_cooldown: float = 0.60
+        self.swipe_cooldown: float = 0.45
 
         # Radial menu state
         self.dual_open_start_time: Optional[float] = None
@@ -180,9 +185,10 @@ class GestureRecognizer:
         d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
         d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
         if mcp_idx is not None:
-            d_mcp_wrist = self._euclidean_dist(landmarks[mcp_idx], wrist)
-            return (d_tip_wrist > d_pip_wrist * 1.06) and (d_tip_wrist > d_mcp_wrist * 1.12)
-        return d_tip_wrist > d_pip_wrist * 1.06
+            d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
+            d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
+            return (d_tip_wrist > d_pip_wrist * 1.05) and (d_tip_mcp > d_pip_mcp * 1.15)
+        return d_tip_wrist > d_pip_wrist * 1.05
 
     def _is_finger_curled(self, landmarks, tip_idx: int, pip_idx: int, mcp_idx: Optional[int] = None) -> bool:
         if landmarks is None or len(landmarks) < 21:
@@ -193,8 +199,8 @@ class GestureRecognizer:
         if mcp_idx is not None:
             d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
             d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
-            return (d_tip_wrist <= d_pip_wrist * 1.15) or (d_tip_mcp <= d_pip_mcp * 1.20)
-        return d_tip_wrist <= d_pip_wrist * 1.15
+            return (d_tip_wrist < d_pip_wrist) or (d_tip_mcp < d_pip_mcp * 1.05)
+        return d_tip_wrist < d_pip_wrist
 
     def _is_thumb_extended(self, landmarks) -> bool:
         if landmarks is None or len(landmarks) < 21:
@@ -310,7 +316,6 @@ class GestureRecognizer:
 
         active_sector = None
         if R_INNER <= dist <= R_OUTER and RADIAL_ACTIONS:
-            # Dynamic N-sector hit test in Cartesian coordinates (0 deg East, 90 deg North)
             angle_deg = (math.degrees(math.atan2(cy - sy, dx)) + 360.0) % 360.0
             n_sectors = len(RADIAL_ACTIONS)
             sector_w = 360.0 / n_sectors
@@ -377,38 +382,56 @@ class GestureRecognizer:
         idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
         mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
         ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
-        pinky_curled = self._is_finger_curled(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
+        pinky_ext = self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
 
-        if idx_ext and mid_ext and ring_ext and pinky_curled:
-            mid_tip = landmarks[self.MIDDLE_TIP]
-            curr_x, curr_y = self._get_lm_xy(mid_tip)
+        # 3 fingers extended (Index, Middle, Ring), Pinky NOT extended
+        if idx_ext and mid_ext and ring_ext and not pinky_ext:
+            # Active in 3-finger posture: cancel any scrolling momentum immediately
+            self.cancel_momentum_scroll()
+
+            # Track Middle MCP (landmark 9) for rock-solid stability during hand translation
+            mid_mcp = landmarks[self.MIDDLE_MCP]
+            curr_x, curr_y = self._get_lm_xy(mid_mcp)
             self.three_finger_history.append((curr_x, curr_y, now))
 
             # Maintain rolling 0.35s history
             self.three_finger_history = [p for p in self.three_finger_history if (now - p[2]) <= 0.35]
 
-            if (now - self.last_swipe_time) > self.swipe_cooldown and len(self.three_finger_history) >= 4:
+            # Cooldown check
+            if (now - self.last_swipe_time) > self.swipe_cooldown and len(self.three_finger_history) >= 3:
                 start_x, start_y, _ = self.three_finger_history[0]
                 dx = curr_x - start_x
                 dy = curr_y - start_y
 
-                SWIPE_DIST_THRESHOLD = 0.15
+                # Responsive threshold (7.5% of frame distance)
+                SWIPE_DIST_THRESHOLD = 0.075
 
                 if abs(dx) > abs(dy) and abs(dx) > SWIPE_DIST_THRESHOLD:
                     self.last_swipe_time = now
                     self.three_finger_history.clear()
+                    # Inverted per user experience:
+                    # Swiping left on screen (dx < 0) -> Space Right
+                    # Swiping right on screen (dx > 0) -> Space Left
                     if dx < 0:
-                        return GestureState.SWIPE_NAV, "Desktop Space Left", "SPACE_LEFT"
+                        return GestureState.SWIPE_NAV, "Desktop Space Left", "SPACE_RIGHT"
                     else:
-                        return GestureState.SWIPE_NAV, "Desktop Space Right", "SPACE_RIGHT"
-                elif abs(dy) > abs(dx) and dy < -SWIPE_DIST_THRESHOLD:
+                        return GestureState.SWIPE_NAV, "Desktop Space Right", "SPACE_LEFT"
+
+                elif abs(dy) > abs(dx) and abs(dy) > SWIPE_DIST_THRESHOLD:
                     self.last_swipe_time = now
                     self.three_finger_history.clear()
-                    return GestureState.SWIPE_NAV, "Mission Control", "MISSION_CONTROL"
+                    if dy < 0:
+                        # Hand swiped UP (y decreased) -> Mission Control
+                        return GestureState.SWIPE_NAV, "Mission Control", "MISSION_CONTROL"
+                    else:
+                        # Hand swiped DOWN (y increased) -> App Exposé
+                        return GestureState.SWIPE_NAV, "App Exposé", "APP_EXPOSE"
+
+            # 3 fingers are held up: return SWIPE_NAV so it does NOT leak into scrolling or clicking!
+            return GestureState.SWIPE_NAV, "3-Finger Swipe Ready", None
         else:
             self.three_finger_history.clear()
-
-        return None
+            return None
 
     def _eval_scrolling(
         self,
@@ -420,10 +443,15 @@ class GestureRecognizer:
         """Handles 2-finger scroll with inertial momentum."""
         idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
         mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
-        ring_curled = self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
-        pinky_curled = self._is_finger_curled(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
+        ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
 
-        if idx_ext and mid_ext and ring_curled and pinky_curled:
+        # STRICT EXCLUSION: If Ring finger is extended, this is 3-finger swipe mode, NOT 2-finger scroll!
+        if ring_ext:
+            self.cancel_momentum_scroll()
+            return None
+
+        # Two-finger scroll: Index + Middle extended, Ring NOT extended
+        if idx_ext and mid_ext and not ring_ext:
             self.is_momentum_scrolling = False
             self.last_momentum_time = None
 
@@ -552,6 +580,7 @@ class GestureRecognizer:
         sx, sy = screen_pos
 
         # 3. Three-Finger Swipes (Spaces & Mission Control)
+        # Priority check: evaluated BEFORE scrolling and pointer actions
         swipe_res = self._eval_swipes(landmarks, screen_pos, now)
         if swipe_res is not None:
             state, status, nav_action = swipe_res
@@ -581,7 +610,7 @@ class GestureRecognizer:
                 is_modifier_active=is_modifier_active,
             )
 
-        # 5. Pointer Navigation & Pinch Clicks / Dragging
+        # 5. Pointer Navigation & Pinch Clicks / Instant Dragging
         palm_scale = self._get_palm_scale(landmarks)
         thumb_tip = landmarks[self.THUMB_TIP]
         index_tip = landmarks[self.INDEX_TIP]
@@ -602,6 +631,7 @@ class GestureRecognizer:
         if not self.is_pinching:
             if pinch_contact:
                 self.is_pinching = True
+                self.is_dragging = False
                 self.pinch_start_time = now
                 self.pinch_freeze_x = sx
                 self.pinch_freeze_y = sy
@@ -610,46 +640,43 @@ class GestureRecognizer:
                 status_msg = "[SHIFT] Pinch Active" if is_modifier_active else "Pinch Active"
                 effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
         else:
-            if index_thumb_min_dist > self.pinch_release_threshold:
-                # Pinch released
-                pinch_duration = now - self.pinch_start_time
-                self.is_pinching = False
+            dist_moved = math.hypot(sx - self.pinch_freeze_x, sy - self.pinch_freeze_y)
 
-                if self.is_dragging:
-                    self.is_dragging = False
+            if index_thumb_min_dist > self.pinch_release_threshold:
+                # --- PINCH RELEASED ---
+                was_dragging = self.is_dragging
+                self.is_pinching = False
+                self.is_dragging = False
+
+                if was_dragging:
+                    # Drag completed and released
                     current_action = GestureState.POINTING
                     status_msg = "Drag Released"
                     effective_x, effective_y = sx, sy
                 else:
-                    # Released within tap window (< 250ms)
-                    if pinch_duration < self.tap_max_time:
-                        if self.pinch_start_modifier or is_modifier_active:
-                            current_action = GestureState.RIGHT_CLICK
-                            status_msg = "[SHIFT] Right Click"
-                        else:
-                            time_since_last_tap = now - self.last_tap_time
-                            tap_dist = math.hypot(self.pinch_freeze_x - self.last_tap_x, self.pinch_freeze_y - self.last_tap_y)
-                            if time_since_last_tap < self.double_click_window and tap_dist < 45.0:
-                                current_action = GestureState.DOUBLE_CLICK
-                                status_msg = "Double Click"
-                                self.last_tap_time = 0.0
-                            else:
-                                current_action = GestureState.CLICK
-                                status_msg = "Left Click"
-                                self.last_tap_time = now
-                                self.last_tap_x = self.pinch_freeze_x
-                                self.last_tap_y = self.pinch_freeze_y
+                    # Released without travel -> Trigger Click
+                    if self.pinch_start_modifier or is_modifier_active:
+                        current_action = GestureState.RIGHT_CLICK
+                        status_msg = "[SHIFT] Right Click"
                     else:
-                        current_action = GestureState.CLICK
-                        status_msg = "Left Click"
+                        time_since_last_tap = now - self.last_tap_time
+                        tap_dist = math.hypot(self.pinch_freeze_x - self.last_tap_x, self.pinch_freeze_y - self.last_tap_y)
+                        if time_since_last_tap < self.double_click_window and tap_dist < 45.0:
+                            current_action = GestureState.DOUBLE_CLICK
+                            status_msg = "Double Click"
+                            self.last_tap_time = 0.0
+                        else:
+                            current_action = GestureState.CLICK
+                            status_msg = "Left Click"
+                            self.last_tap_time = now
+                            self.last_tap_x = self.pinch_freeze_x
+                            self.last_tap_y = self.pinch_freeze_y
 
                     effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
             else:
-                # Pinch held
-                pinch_duration = now - self.pinch_start_time
-                dist_moved = math.hypot(sx - self.pinch_freeze_x, sy - self.pinch_freeze_y)
-
-                if (pinch_duration > self.drag_time_threshold and dist_moved > self.drag_dist_threshold) and not self.is_dragging:
+                # --- PINCH HELD ---
+                # Instant spatial threshold: ZERO time delay!
+                if dist_moved > self.drag_dist_threshold:
                     self.is_dragging = True
 
                 if self.is_dragging:
@@ -658,7 +685,7 @@ class GestureRecognizer:
                     effective_x, effective_y = sx, sy
                 else:
                     current_action = GestureState.PINCHING
-                    status_msg = "Pinch Locked"
+                    status_msg = "Pinch Active"
                     effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
 
         return GestureData(
@@ -672,4 +699,6 @@ class GestureRecognizer:
             is_tracking=True,
             status_message=status_msg,
             is_modifier_active=is_modifier_active,
+            drag_start_x=self.pinch_freeze_x,
+            drag_start_y=self.pinch_freeze_y,
         )
