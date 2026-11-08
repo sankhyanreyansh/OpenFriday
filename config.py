@@ -23,8 +23,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "margin_y": 0.16,
 
     # Dynamic Filter & Sensitivity Settings
-    "min_cutoff": 0.2,
-    "beta": 0.003,
+    "min_cutoff": 1.0,
+    "beta": 0.025,
     "pinch_threshold": 0.4,
     "scroll_sensitivity": 1.0,
 

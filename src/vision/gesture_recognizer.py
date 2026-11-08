@@ -90,12 +90,12 @@ class GestureRecognizer:
 
     def __init__(self):
         # Pinch contact thresholds (normalized to palm scale)
-        self.pinch_start_threshold = 0.40
-        self.pinch_release_threshold = 0.54
+        self.pinch_start_threshold = 0.38
+        self.pinch_release_threshold = 0.52
 
         # Timing and travel thresholds
         self.tap_max_time = 0.35          # Tap duration < 350ms
-        self.drag_dist_threshold = 12.0   # Crisp 12px spatial travel threshold (Zero time delay)
+        self.drag_dist_threshold = 28.0   # Spatial travel threshold for drag (28px prevents hand flex on clicks)
         self.double_click_window = 0.40   # Double-tap window (400ms)
 
         # State tracking
@@ -121,10 +121,13 @@ class GestureRecognizer:
         self.MOMENTUM_MIN_VELOCITY: float = 3.0
         self.MOMENTUM_DECAY_RATE: float = 6.5
 
-        # Three-finger space navigation
+        # Three-finger space navigation with hysteresis
         self.three_finger_history: List[Tuple[float, float, float]] = []
         self.last_swipe_time: float = 0.0
-        self.swipe_cooldown: float = 0.45
+        self.swipe_cooldown: float = 0.28
+        self.is_in_swipe_mode: bool = False
+        self.three_finger_detect_frames: int = 0
+        self.three_finger_lost_frames: int = 0
 
         # Radial menu state
         self.dual_open_start_time: Optional[float] = None
@@ -179,28 +182,32 @@ class GestureRecognizer:
         return max((wrist_to_middle + palm_breadth) * 0.5, 0.01)
 
     def _is_finger_extended(self, landmarks, tip_idx: int, pip_idx: int, mcp_idx: Optional[int] = None) -> bool:
+        """Tilt- and rotation-invariant 3D extension detection using MCP-to-TIP phalanx ratio."""
         if landmarks is None or len(landmarks) < 21:
             return False
-        wrist = landmarks[self.WRIST]
-        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
-        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
         if mcp_idx is not None:
             d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
             d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
-            return (d_tip_wrist > d_pip_wrist * 1.05) and (d_tip_mcp > d_pip_mcp * 1.15)
-        return d_tip_wrist > d_pip_wrist * 1.05
+            if d_pip_mcp > 0.001:
+                return (d_tip_mcp / d_pip_mcp) > 1.40
+        wrist = landmarks[self.WRIST]
+        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
+        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
+        return d_tip_wrist > d_pip_wrist * 1.08
 
     def _is_finger_curled(self, landmarks, tip_idx: int, pip_idx: int, mcp_idx: Optional[int] = None) -> bool:
+        """Tilt- and rotation-invariant 3D curled detection."""
         if landmarks is None or len(landmarks) < 21:
             return False
-        wrist = landmarks[self.WRIST]
-        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
-        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
         if mcp_idx is not None:
             d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
             d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
-            return (d_tip_wrist < d_pip_wrist) or (d_tip_mcp < d_pip_mcp * 1.05)
-        return d_tip_wrist < d_pip_wrist
+            if d_pip_mcp > 0.001:
+                return (d_tip_mcp / d_pip_mcp) < 1.25
+        wrist = landmarks[self.WRIST]
+        d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
+        d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
+        return d_tip_wrist < d_pip_wrist * 0.98
 
     def _is_thumb_extended(self, landmarks) -> bool:
         if landmarks is None or len(landmarks) < 21:
@@ -225,18 +232,47 @@ class GestureRecognizer:
             self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
         )
 
-    def is_hand_pinched(self, landmarks) -> bool:
-        """Evaluates if hand configuration is in an active pinch contact."""
+    def is_scrolling_posture(self, landmarks) -> bool:
+        """
+        Detects if hand is in two-finger scrolling posture:
+        Index and Middle extended, Middle not curled into palm, and NOT in pinch contact.
+        """
         if landmarks is None or len(landmarks) < 21:
             return False
-        palm_scale = self._get_palm_scale(landmarks)
+
+        if self.is_hand_pinched(landmarks):
+            return False
+
+        idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
+        mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+        mid_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+
+        return (idx_ext or mid_ext) and (not mid_curled)
+
+    def is_hand_pinched(self, landmarks) -> bool:
+        """
+        Evaluates if hand configuration is in an active pinch contact.
+        Watertight rules:
+        1. In two-finger scroll, index tip is closer to middle tip than thumb. In pinch, index touches thumb!
+        2. Index-to-thumb distance normalized to palm scale < pinch_start_threshold.
+        """
+        if landmarks is None or len(landmarks) < 21:
+            return False
+
         thumb_tip = landmarks[self.THUMB_TIP]
         index_tip = landmarks[self.INDEX_TIP]
-        index_dip = landmarks[self.INDEX_DIP]
+        middle_tip = landmarks[self.MIDDLE_TIP]
 
-        d_tip = self._euclidean_dist(index_tip, thumb_tip) / palm_scale
-        d_dip = self._euclidean_dist(index_dip, thumb_tip) / palm_scale
-        return min(d_tip, d_dip) < self.pinch_start_threshold
+        d_index_thumb = self._euclidean_dist(index_tip, thumb_tip)
+        d_index_middle = self._euclidean_dist(index_tip, middle_tip)
+
+        # In two-finger scroll, index and middle tips are side-by-side, closer than index-to-thumb
+        if d_index_middle < d_index_thumb:
+            return False
+
+        palm_scale = self._get_palm_scale(landmarks)
+        d_tip = d_index_thumb / palm_scale
+        return d_tip < self.pinch_start_threshold
 
     def get_stable_pointer_coords(self, landmarks) -> Tuple[float, float]:
         """Drives cursor navigation directly from Index MCP (Landmark 5, base knuckle)."""
@@ -378,48 +414,80 @@ class GestureRecognizer:
         screen_pos: Tuple[float, float],
         now: float,
     ) -> Optional[Tuple[GestureState, str, Optional[str]]]:
-        """Detects 3-finger swipes for Spaces and Mission Control."""
+        """Detects 3-finger swipes for Spaces and Mission Control with debounced hysteresis."""
+        # STRICT RULE: If hand is in pinch contact (or pinching to click), NEVER evaluate as swipe!
+        palm_scale = self._get_palm_scale(landmarks)
+        thumb_tip = landmarks[self.THUMB_TIP]
+        index_tip = landmarks[self.INDEX_TIP]
+        d_thumb_index = self._euclidean_dist(thumb_tip, index_tip) / palm_scale
+
+        if d_thumb_index < (self.pinch_start_threshold + 0.08) or self.is_pinching or self.is_hand_pinched(landmarks):
+            self.is_in_swipe_mode = False
+            self.three_finger_detect_frames = 0
+            self.three_finger_lost_frames = 0
+            self.three_finger_history.clear()
+            return None
+
         idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
         mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
         ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
-        pinky_ext = self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
+        ring_curled = self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
 
-        # 3 fingers extended (Index, Middle, Ring), Pinky NOT extended
-        if idx_ext and mid_ext and ring_ext and not pinky_ext:
-            # Active in 3-finger posture: cancel any scrolling momentum immediately
+        # 3-finger posture: Index, Middle, AND Ring extended, thumb clearly open away from index
+        is_three_finger_posture = idx_ext and mid_ext and (ring_ext or not ring_curled) and (d_thumb_index > 0.45)
+
+        if is_three_finger_posture:
+            self.three_finger_detect_frames += 1
+            self.three_finger_lost_frames = 0
+            self.is_in_swipe_mode = True
+        else:
+            self.three_finger_lost_frames += 1
+            if self.three_finger_lost_frames >= 4:
+                self.is_in_swipe_mode = False
+                self.three_finger_detect_frames = 0
+                self.three_finger_history.clear()
+
+        # If confirmed in 3-finger swipe mode:
+        if self.is_in_swipe_mode:
             self.cancel_momentum_scroll()
+            self.is_pinching = False
+            self.is_dragging = False
 
             # Track Middle MCP (landmark 9) for rock-solid stability during hand translation
             mid_mcp = landmarks[self.MIDDLE_MCP]
             curr_x, curr_y = self._get_lm_xy(mid_mcp)
-            self.three_finger_history.append((curr_x, curr_y, now))
 
+            # If still within cooldown from previous swipe:
+            # Continually anchor history to current hand position so that as soon as cooldown finishes,
+            # swipe distance is measured freshly from the hand's current position!
+            if (now - self.last_swipe_time) < self.swipe_cooldown:
+                self.three_finger_history = [(curr_x, curr_y, now)]
+                return GestureState.SWIPE_NAV, "3-Finger Navigation", None
+
+            self.three_finger_history.append((curr_x, curr_y, now))
             # Maintain rolling 0.35s history
             self.three_finger_history = [p for p in self.three_finger_history if (now - p[2]) <= 0.35]
 
-            # Cooldown check
-            if (now - self.last_swipe_time) > self.swipe_cooldown and len(self.three_finger_history) >= 3:
-                start_x, start_y, _ = self.three_finger_history[0]
+            # Evaluation check
+            if len(self.three_finger_history) >= 2:
+                start_x, start_y, start_t = self.three_finger_history[0]
                 dx = curr_x - start_x
                 dy = curr_y - start_y
+                dt = max(now - start_t, 0.001)
 
-                # Responsive threshold (7.5% of frame distance)
-                SWIPE_DIST_THRESHOLD = 0.075
+                SWIPE_DIST_THRESHOLD = 0.065
 
-                if abs(dx) > abs(dy) and abs(dx) > SWIPE_DIST_THRESHOLD:
+                if abs(dx) > abs(dy) and abs(dx) > SWIPE_DIST_THRESHOLD and (abs(dx) / dt) > 0.18:
                     self.last_swipe_time = now
-                    self.three_finger_history.clear()
-                    # Inverted per user experience:
-                    # Swiping left on screen (dx < 0) -> Space Right
-                    # Swiping right on screen (dx > 0) -> Space Left
+                    self.three_finger_history = [(curr_x, curr_y, now)]
                     if dx < 0:
                         return GestureState.SWIPE_NAV, "Desktop Space Left", "SPACE_RIGHT"
                     else:
                         return GestureState.SWIPE_NAV, "Desktop Space Right", "SPACE_LEFT"
 
-                elif abs(dy) > abs(dx) and abs(dy) > SWIPE_DIST_THRESHOLD:
+                elif abs(dy) > abs(dx) and abs(dy) > SWIPE_DIST_THRESHOLD and (abs(dy) / dt) > 0.18:
                     self.last_swipe_time = now
-                    self.three_finger_history.clear()
+                    self.three_finger_history = [(curr_x, curr_y, now)]
                     if dy < 0:
                         # Hand swiped UP (y decreased) -> Mission Control
                         return GestureState.SWIPE_NAV, "Mission Control", "MISSION_CONTROL"
@@ -429,9 +497,8 @@ class GestureRecognizer:
 
             # 3 fingers are held up: return SWIPE_NAV so it does NOT leak into scrolling or clicking!
             return GestureState.SWIPE_NAV, "3-Finger Swipe Ready", None
-        else:
-            self.three_finger_history.clear()
-            return None
+
+        return None
 
     def _eval_scrolling(
         self,
@@ -440,49 +507,64 @@ class GestureRecognizer:
         is_modifier_active: bool,
         now: float,
     ) -> Optional[Tuple[GestureState, int, str]]:
-        """Handles 2-finger scroll with inertial momentum."""
-        idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
-        mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
-        ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
-
-        # STRICT EXCLUSION: If Ring finger is extended, this is 3-finger swipe mode, NOT 2-finger scroll!
-        if ring_ext:
+        """Handles 2-finger scroll with inertial momentum. Strictly requires Left Hand (modifier) to be up."""
+        # STRICT REQUIREMENT: Scrolling ONLY occurs when the Left Hand (modifier) is actively up!
+        if not is_modifier_active:
             self.cancel_momentum_scroll()
             return None
 
-        # Two-finger scroll: Index + Middle extended, Ring NOT extended
-        if idx_ext and mid_ext and not ring_ext:
+        # If hand is in active pinch contact (Right Click), do NOT scroll!
+        if self.is_hand_pinched(landmarks) or self.is_pinching:
+            self.prev_scroll_y = None
+            self.last_scroll_time = None
+            self.cancel_momentum_scroll()
+            return None
+
+        # Scrolling posture: Index is extended and Middle is extended (or not curled into palm)
+        idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
+        mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+        mid_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
+
+        # In 2-finger scroll, Middle finger is extended/up alongside Index. If Middle is curled, user is pointing!
+        is_scroll_pose = (idx_ext or mid_ext) and (not mid_curled)
+
+        if is_scroll_pose:
             self.is_momentum_scrolling = False
             self.last_momentum_time = None
+            self.is_pinching = False
+            self.is_dragging = False
 
-            mid_tip = landmarks[self.MIDDLE_TIP]
-            _, mid_y = self._get_lm_xy(mid_tip)
+            # Track average Y position of Index and Middle fingertips for rock-solid, jitter-free scrolling
+            idx_y = self._get_lm_xy(landmarks[self.INDEX_TIP])[1]
+            mid_y = self._get_lm_xy(landmarks[self.MIDDLE_TIP])[1]
+            curr_y = (idx_y + mid_y) * 0.5
 
             if self.prev_scroll_y is None:
-                self.prev_scroll_y = mid_y
+                self.prev_scroll_y = curr_y
                 self.last_scroll_time = now
                 self.scroll_accumulator = 0.0
-                return GestureState.SCROLLING, 0, "Scrolling Engaged"
+                return GestureState.SCROLLING, 0, "[SHIFT] Scrolling Engaged"
 
-            dy_raw = mid_y - self.prev_scroll_y
+            dy_raw = curr_y - self.prev_scroll_y
             dt = max(now - (self.last_scroll_time or now), 0.001)
 
             # Deadband threshold
-            if abs(dy_raw) < 0.003:
-                self.prev_scroll_y = mid_y
-                self.last_scroll_time = now
-                return GestureState.SCROLLING, 0, "Scrolling Neutral"
+            if abs(dy_raw) < 0.0015:
+                dy_raw = 0.0
 
-            # Compute velocity and accumulate
-            scroll_dy_lines = int(-dy_raw * 180.0 * self.scroll_sensitivity)
-            self.scroll_velocity_y = (-dy_raw / dt) * 12.0
-            self.prev_scroll_y = mid_y
+            # Accumulate smooth continuous scroll
+            self.scroll_accumulator += (-dy_raw * 340.0 * self.scroll_sensitivity)
+            self.scroll_velocity_y = (-dy_raw / dt) * 10.0
+            self.prev_scroll_y = curr_y
             self.last_scroll_time = now
 
-            status = f"Scrolling ({'+' if scroll_dy_lines > 0 else ''}{scroll_dy_lines})"
+            scroll_dy_lines = int(self.scroll_accumulator)
+            self.scroll_accumulator -= scroll_dy_lines
+
+            status = f"[SHIFT] Scrolling ({'+' if scroll_dy_lines > 0 else ''}{scroll_dy_lines})"
             return GestureState.SCROLLING, scroll_dy_lines, status
 
-        # Hand exited scroll posture -> apply momentum decay
+        # Hand exited scroll posture (e.g. curled middle finger to point) -> apply momentum decay
         self.prev_scroll_y = None
         self.last_scroll_time = None
 
@@ -497,12 +579,15 @@ class GestureRecognizer:
             decay = math.exp(-self.MOMENTUM_DECAY_RATE * dt_mom)
             self.scroll_velocity_y *= decay
 
-            momentum_dy = int(self.scroll_velocity_y * dt_mom * 8.0)
+            self.scroll_accumulator += self.scroll_velocity_y * dt_mom * 12.0
+            momentum_dy = int(self.scroll_accumulator)
+            self.scroll_accumulator -= momentum_dy
+
             if abs(self.scroll_velocity_y) <= self.MOMENTUM_MIN_VELOCITY or momentum_dy == 0:
                 self.cancel_momentum_scroll()
                 return None
 
-            return GestureState.SCROLLING, momentum_dy, "Coasting Scroll..."
+            return GestureState.SCROLLING, momentum_dy, "[SHIFT] Coasting Scroll..."
         else:
             self.cancel_momentum_scroll()
             return None
@@ -580,20 +665,27 @@ class GestureRecognizer:
         sx, sy = screen_pos
 
         # 3. Three-Finger Swipes (Spaces & Mission Control)
-        # Priority check: evaluated BEFORE scrolling and pointer actions
-        swipe_res = self._eval_swipes(landmarks, screen_pos, now)
-        if swipe_res is not None:
-            state, status, nav_action = swipe_res
-            return GestureData(
-                screen_x=sx,
-                screen_y=sy,
-                state=state,
-                hand_landmarks=landmarks,
-                is_tracking=True,
-                status_message=status,
-                is_modifier_active=is_modifier_active,
-                nav_action=nav_action,
-            )
+        # STRICT RULE: 3-finger swipe CANNOT happen when Left Hand is up, or when hand is pinching!
+        # Swipes are strictly single-hand navigation gestures with fingers spread open.
+        if not is_modifier_active and not self.is_pinching:
+            swipe_res = self._eval_swipes(landmarks, screen_pos, now)
+            if swipe_res is not None:
+                state, status, nav_action = swipe_res
+                return GestureData(
+                    screen_x=sx,
+                    screen_y=sy,
+                    state=state,
+                    hand_landmarks=landmarks,
+                    is_tracking=True,
+                    status_message=status,
+                    is_modifier_active=is_modifier_active,
+                    nav_action=nav_action,
+                )
+        else:
+            self.is_in_swipe_mode = False
+            self.three_finger_history.clear()
+            self.three_finger_detect_frames = 0
+            self.three_finger_lost_frames = 0
 
         # 4. Two-Finger Scrolling & Momentum
         scroll_res = self._eval_scrolling(landmarks, screen_pos, is_modifier_active, now)
@@ -641,6 +733,7 @@ class GestureRecognizer:
                 effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
         else:
             dist_moved = math.hypot(sx - self.pinch_freeze_x, sy - self.pinch_freeze_y)
+            pinch_dur = now - self.pinch_start_time
 
             if index_thumb_min_dist > self.pinch_release_threshold:
                 # --- PINCH RELEASED ---
@@ -648,7 +741,9 @@ class GestureRecognizer:
                 self.is_pinching = False
                 self.is_dragging = False
 
-                if was_dragging:
+                # Quick release with modest movement is ALWAYS a click, never drag!
+                # Only treat as drag release if it was a deliberate, sustained drag
+                if was_dragging and (dist_moved > 36.0 or pinch_dur > 0.38):
                     # Drag completed and released
                     current_action = GestureState.POINTING
                     status_msg = "Drag Released"
@@ -675,9 +770,11 @@ class GestureRecognizer:
                     effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
             else:
                 # --- PINCH HELD ---
-                # Instant spatial threshold: ZERO time delay!
-                if dist_moved > self.drag_dist_threshold:
-                    self.is_dragging = True
+                # STRICT RULE: Dragging is ONLY allowed when Left Hand modifier is NOT up!
+                if not is_modifier_active and not self.pinch_start_modifier:
+                    # Deliberate spatial drag: requires travel > 28px or sustained hold movement (> 16px after 180ms)
+                    if dist_moved > self.drag_dist_threshold or (pinch_dur > 0.18 and dist_moved > 16.0):
+                        self.is_dragging = True
 
                 if self.is_dragging:
                     current_action = GestureState.DRAGGING
@@ -685,7 +782,7 @@ class GestureRecognizer:
                     effective_x, effective_y = sx, sy
                 else:
                     current_action = GestureState.PINCHING
-                    status_msg = "Pinch Active"
+                    status_msg = "[SHIFT] Pinch Active" if is_modifier_active else "Pinch Active"
                     effective_x, effective_y = self.pinch_freeze_x, self.pinch_freeze_y
 
         return GestureData(

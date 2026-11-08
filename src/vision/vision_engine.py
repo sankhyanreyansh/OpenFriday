@@ -128,7 +128,7 @@ class VisionEngine(QThread):
         # Sub-modules
         self.gesture_recognizer = GestureRecognizer()
         self.landmark_smoother = LandmarkSmoother(base_alpha=0.45, speed_coeff=8.0)
-        self.cursor_smoother = CursorSmoother(min_cutoff=0.2, beta=0.003)
+        self.cursor_smoother = CursorSmoother(min_cutoff=1.0, beta=0.025, d_cutoff=1.5)
 
         # Operational Settings
         self.tracking_enabled = True
@@ -167,9 +167,9 @@ class VisionEngine(QThread):
         if "scroll_sensitivity" in settings:
             self.gesture_recognizer.scroll_sensitivity = float(settings["scroll_sensitivity"])
 
-        min_cutoff = settings.get("min_cutoff", 0.2)
-        beta = settings.get("beta", 0.003)
-        self.cursor_smoother = CursorSmoother(min_cutoff=min_cutoff, beta=beta)
+        min_cutoff = settings.get("min_cutoff", 1.0)
+        beta = settings.get("beta", 0.025)
+        self.cursor_smoother = CursorSmoother(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.5)
 
     def dismiss_radial_menu(self):
         """Manually dismisses the radial shortcut wheel."""
@@ -357,7 +357,7 @@ class VisionEngine(QThread):
 
                     # Check for Dual-Hand Pinch Spatial Zoom
                     zoom_delta = 0.0
-                    if left_hand_landmarks is not None:
+                    if left_hand_landmarks is not None and not self.gesture_recognizer.is_in_swipe_mode:
                         left_is_pinched = self.gesture_recognizer.is_hand_pinched(left_hand_landmarks)
                         right_is_pinched = self.gesture_recognizer.is_hand_pinched(smoothed_landmarks)
                         zoom_delta = self.gesture_recognizer.process_dual_hand_zoom(
@@ -366,6 +366,8 @@ class VisionEngine(QThread):
                             left_is_pinched,
                             right_is_pinched,
                         )
+                    else:
+                        self.gesture_recognizer.dual_pinch_active = False
 
                     if self.gesture_recognizer.dual_pinch_active:
                         if self.was_dragging:
@@ -461,6 +463,8 @@ class VisionEngine(QThread):
             if self.was_dragging:
                 self.mouse_controller.mouse_up(screen_x, screen_y)
                 self.was_dragging = False
+            # Seamlessly move mouse cursor during swipe so cursor and reticle track continuously
+            self.mouse_controller.move_to(screen_x, screen_y)
             if nav_action == "SPACE_RIGHT":
                 self.mouse_controller.switch_space_right()
             elif nav_action == "SPACE_LEFT":
