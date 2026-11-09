@@ -121,10 +121,15 @@ class GestureRecognizer:
         self.MOMENTUM_MIN_VELOCITY: float = 3.0
         self.MOMENTUM_DECAY_RATE: float = 6.5
 
-        # Three-finger space navigation with hysteresis
+        # Three-finger space navigation with turning-point inflection detection
         self.three_finger_history: List[Tuple[float, float, float]] = []
         self.last_swipe_time: float = 0.0
-        self.swipe_cooldown: float = 0.28
+        self.last_swipe_dir: Optional[str] = None
+        self.SAME_DIR_COOLDOWN: float = 0.16       # 160ms for fast repeated flicks in same direction
+        self.OPPOSITE_DIR_COOLDOWN: float = 0.38   # 380ms recoil guard against bounce-back triggers
+        self.PERP_DIR_COOLDOWN: float = 0.20       # 200ms between horizontal and vertical swipes
+        self.SWIPE_DIST_THRESHOLD: float = 0.052   # 5.2% of camera frame width
+        self.MIN_SWIPE_SPEED: float = 0.38         # Normalized velocity threshold
         self.is_in_swipe_mode: bool = False
         self.three_finger_detect_frames: int = 0
         self.three_finger_lost_frames: int = 0
@@ -415,34 +420,55 @@ class GestureRecognizer:
         now: float,
     ) -> Optional[Tuple[GestureState, str, Optional[str]]]:
         """Detects 3-finger swipes for Spaces and Mission Control with debounced hysteresis."""
-        # STRICT RULE: If hand is in pinch contact (or pinching to click), NEVER evaluate as swipe!
+        # STRICT RULE 1: If hand is in pinch contact (or pinching to click), NEVER evaluate as swipe!
         palm_scale = self._get_palm_scale(landmarks)
         thumb_tip = landmarks[self.THUMB_TIP]
         index_tip = landmarks[self.INDEX_TIP]
         d_thumb_index = self._euclidean_dist(thumb_tip, index_tip) / palm_scale
 
-        if d_thumb_index < (self.pinch_start_threshold + 0.08) or self.is_pinching or self.is_hand_pinched(landmarks):
+        if d_thumb_index < 0.45 or self.is_pinching or self.is_hand_pinched(landmarks):
             self.is_in_swipe_mode = False
             self.three_finger_detect_frames = 0
             self.three_finger_lost_frames = 0
             self.three_finger_history.clear()
             return None
 
+        # STRICT RULE 2: Three fingers (Index, Middle, Ring) MUST ALL be genuinely extended.
+        # When pointing with index alone, middle and ring fingers are curled into palm.
         idx_ext = self._is_finger_extended(landmarks, self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP)
         mid_ext = self._is_finger_extended(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
         ring_ext = self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
+
+        mid_curled = self._is_finger_curled(landmarks, self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP)
         ring_curled = self._is_finger_curled(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP)
 
-        # 3-finger posture: Index, Middle, AND Ring extended, thumb clearly open away from index
-        is_three_finger_posture = idx_ext and mid_ext and (ring_ext or not ring_curled) and (d_thumb_index > 0.45)
+        wrist = landmarks[self.WRIST]
+        d_wrist_idx = self._euclidean_dist(landmarks[self.INDEX_TIP], wrist)
+        d_wrist_mid = self._euclidean_dist(landmarks[self.MIDDLE_TIP], wrist)
+        d_wrist_ring = self._euclidean_dist(landmarks[self.RING_TIP], wrist)
 
+        # 3-finger posture: Index, Middle, AND Ring extended outward together,
+        # middle & ring not curled into palm, and thumb clearly open away from index.
+        is_three_finger_posture = (
+            idx_ext and
+            mid_ext and
+            ring_ext and
+            (not mid_curled) and
+            (not ring_curled) and
+            (d_wrist_mid >= d_wrist_idx * 0.85) and
+            (d_wrist_ring >= d_wrist_idx * 0.75) and
+            (d_thumb_index > 0.42)
+        )
+
+        # Debounced entry: Require 2 consecutive frames to enter swipe mode (prevents 1-frame pointing noise)
         if is_three_finger_posture:
             self.three_finger_detect_frames += 1
             self.three_finger_lost_frames = 0
-            self.is_in_swipe_mode = True
+            if self.three_finger_detect_frames >= 2:
+                self.is_in_swipe_mode = True
         else:
             self.three_finger_lost_frames += 1
-            if self.three_finger_lost_frames >= 4:
+            if self.three_finger_lost_frames >= 3:
                 self.is_in_swipe_mode = False
                 self.three_finger_detect_frames = 0
                 self.three_finger_history.clear()
@@ -457,46 +483,96 @@ class GestureRecognizer:
             mid_mcp = landmarks[self.MIDDLE_MCP]
             curr_x, curr_y = self._get_lm_xy(mid_mcp)
 
-            # If still within cooldown from previous swipe:
-            # Continually anchor history to current hand position so that as soon as cooldown finishes,
-            # swipe distance is measured freshly from the hand's current position!
-            if (now - self.last_swipe_time) < self.swipe_cooldown:
-                self.three_finger_history = [(curr_x, curr_y, now)]
+            self.three_finger_history.append((curr_x, curr_y, now))
+            # Maintain rolling 220ms history
+            self.three_finger_history = [p for p in self.three_finger_history if (now - p[2]) <= 0.22]
+
+            recent = self.three_finger_history
+            if len(recent) < 3:
+                return GestureState.SWIPE_NAV, "3-Finger Swipe Ready", None
+
+            # Detect candidate flick strokes starting from the motion inflection point / apex
+            candidates = []
+
+            # LEFT candidate (x decreasing from recent maximum)
+            p_max_x = max(recent, key=lambda p: p[0])
+            dx_left = curr_x - p_max_x[0]
+            dt_left = max(now - p_max_x[2], 0.001)
+            dy_left = curr_y - p_max_x[1]
+            if dx_left < -self.SWIPE_DIST_THRESHOLD and dt_left >= 0.035:
+                speed_l = abs(dx_left) / dt_left
+                if speed_l >= self.MIN_SWIPE_SPEED and abs(dx_left) > abs(dy_left) * 1.20:
+                    candidates.append(("LEFT", speed_l, "Desktop Space Left", "SPACE_RIGHT"))
+
+            # RIGHT candidate (x increasing from recent minimum)
+            p_min_x = min(recent, key=lambda p: p[0])
+            dx_right = curr_x - p_min_x[0]
+            dt_right = max(now - p_min_x[2], 0.001)
+            dy_right = curr_y - p_min_x[1]
+            if dx_right > self.SWIPE_DIST_THRESHOLD and dt_right >= 0.035:
+                speed_r = dx_right / dt_right
+                if speed_r >= self.MIN_SWIPE_SPEED and abs(dx_right) > abs(dy_right) * 1.20:
+                    candidates.append(("RIGHT", speed_r, "Desktop Space Right", "SPACE_LEFT"))
+
+            # UP candidate (y decreasing from recent maximum)
+            p_max_y = max(recent, key=lambda p: p[1])
+            dy_up = curr_y - p_max_y[1]
+            dt_up = max(now - p_max_y[2], 0.001)
+            dx_up = curr_x - p_max_y[0]
+            if dy_up < -self.SWIPE_DIST_THRESHOLD and dt_up >= 0.035:
+                speed_u = abs(dy_up) / dt_up
+                if speed_u >= self.MIN_SWIPE_SPEED and abs(dy_up) > abs(dx_up) * 1.20:
+                    candidates.append(("UP", speed_u, "Mission Control", "MISSION_CONTROL"))
+
+            # DOWN candidate (y increasing from recent minimum)
+            p_min_y = min(recent, key=lambda p: p[1])
+            dy_down = curr_y - p_min_y[1]
+            dt_down = max(now - p_min_y[2], 0.001)
+            dx_down = curr_x - p_min_y[0]
+            if dy_down > self.SWIPE_DIST_THRESHOLD and dt_down >= 0.035:
+                speed_d = dy_down / dt_down
+                if speed_d >= self.MIN_SWIPE_SPEED and abs(dy_down) > abs(dx_down) * 1.20:
+                    candidates.append(("DOWN", speed_d, "App Exposé", "APP_EXPOSE"))
+
+            if not candidates:
+                return GestureState.SWIPE_NAV, "3-Finger Swipe Ready", None
+
+            # Pick fastest candidate flick
+            candidates.sort(key=lambda c: c[1], reverse=True)
+            best_dir, best_speed, best_status, best_action = candidates[0]
+
+            dt_last = now - self.last_swipe_time
+
+            # Absolute minimal hardware debounce
+            if dt_last < 0.12:
                 return GestureState.SWIPE_NAV, "3-Finger Navigation", None
 
-            self.three_finger_history.append((curr_x, curr_y, now))
-            # Maintain rolling 0.35s history
-            self.three_finger_history = [p for p in self.three_finger_history if (now - p[2]) <= 0.35]
+            if self.last_swipe_dir is not None:
+                # Suppress opposite recoil bounce-back
+                is_opposite = (
+                    (self.last_swipe_dir == "LEFT" and best_dir == "RIGHT") or
+                    (self.last_swipe_dir == "RIGHT" and best_dir == "LEFT") or
+                    (self.last_swipe_dir == "UP" and best_dir == "DOWN") or
+                    (self.last_swipe_dir == "DOWN" and best_dir == "UP")
+                )
+                if is_opposite and dt_last < self.OPPOSITE_DIR_COOLDOWN:
+                    return GestureState.SWIPE_NAV, "3-Finger Navigation", None
 
-            # Evaluation check
-            if len(self.three_finger_history) >= 2:
-                start_x, start_y, start_t = self.three_finger_history[0]
-                dx = curr_x - start_x
-                dy = curr_y - start_y
-                dt = max(now - start_t, 0.001)
+                # Same-direction quick re-arm for successive swipes
+                is_same = (self.last_swipe_dir == best_dir)
+                if is_same and dt_last < self.SAME_DIR_COOLDOWN:
+                    return GestureState.SWIPE_NAV, "3-Finger Navigation", None
 
-                SWIPE_DIST_THRESHOLD = 0.065
+                # Perpendicular direction cooldown
+                is_perp = not is_opposite and not is_same
+                if is_perp and dt_last < self.PERP_DIR_COOLDOWN:
+                    return GestureState.SWIPE_NAV, "3-Finger Navigation", None
 
-                if abs(dx) > abs(dy) and abs(dx) > SWIPE_DIST_THRESHOLD and (abs(dx) / dt) > 0.18:
-                    self.last_swipe_time = now
-                    self.three_finger_history = [(curr_x, curr_y, now)]
-                    if dx < 0:
-                        return GestureState.SWIPE_NAV, "Desktop Space Left", "SPACE_RIGHT"
-                    else:
-                        return GestureState.SWIPE_NAV, "Desktop Space Right", "SPACE_LEFT"
-
-                elif abs(dy) > abs(dx) and abs(dy) > SWIPE_DIST_THRESHOLD and (abs(dy) / dt) > 0.18:
-                    self.last_swipe_time = now
-                    self.three_finger_history = [(curr_x, curr_y, now)]
-                    if dy < 0:
-                        # Hand swiped UP (y decreased) -> Mission Control
-                        return GestureState.SWIPE_NAV, "Mission Control", "MISSION_CONTROL"
-                    else:
-                        # Hand swiped DOWN (y increased) -> App Exposé
-                        return GestureState.SWIPE_NAV, "App Exposé", "APP_EXPOSE"
-
-            # 3 fingers are held up: return SWIPE_NAV so it does NOT leak into scrolling or clicking!
-            return GestureState.SWIPE_NAV, "3-Finger Swipe Ready", None
+            # Swipe successfully fired!
+            self.last_swipe_time = now
+            self.last_swipe_dir = best_dir
+            self.three_finger_history = [(curr_x, curr_y, now)]
+            return GestureState.SWIPE_NAV, best_status, best_action
 
         return None
 
@@ -686,6 +762,7 @@ class GestureRecognizer:
             self.three_finger_history.clear()
             self.three_finger_detect_frames = 0
             self.three_finger_lost_frames = 0
+            self.last_swipe_dir = None
 
         # 4. Two-Finger Scrolling & Momentum
         scroll_res = self._eval_scrolling(landmarks, screen_pos, is_modifier_active, now)
