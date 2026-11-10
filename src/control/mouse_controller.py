@@ -8,6 +8,7 @@ zoom, and radial shortcut execution directly into the macOS Window Server.
 import time
 import subprocess
 import threading
+import logging
 from typing import Tuple, Optional
 
 try:
@@ -19,13 +20,41 @@ except ImportError:
     pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0.0
 
-from src.control.radial_menu import execute_radial_action
+logger = logging.getLogger("OpenFriday.MouseController")
 
 
 def _run_system_keystroke(key_code: int):
-    """Dispatches Control + KeyCode reliably via macOS System Events."""
+    """
+    Dispatches Control + KeyCode reliably to macOS System Events / WindowServer.
+    macOS intentionally filters out synthetic CGEvents for Mission Control / Spaces switching;
+    AppleScript via System Events is the officially sanctioned and working mechanism.
+    """
     script = f'tell application "System Events" to key code {key_code} using control down'
     subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def post_keyboard_event(key_code: int, flags: int = 0):
+    """
+    Dispatches a native key down + key up event directly into the macOS Window Server.
+    Zero subprocess overhead (<0.1ms) and requires only Accessibility permission.
+    """
+    if QUARTZ_AVAILABLE:
+        now_ns = int(time.time() * 1e9)
+        down_event = CG.CGEventCreateKeyboardEvent(None, key_code, True)
+        if down_event:
+            CG.CGEventSetTimestamp(down_event, now_ns)
+            if flags:
+                CG.CGEventSetFlags(down_event, flags)
+            CG.CGEventPost(CG.kCGHIDEventTap, down_event)
+
+        up_event = CG.CGEventCreateKeyboardEvent(None, key_code, False)
+        if up_event:
+            CG.CGEventSetTimestamp(up_event, now_ns + 15000000)
+            if flags:
+                CG.CGEventSetFlags(up_event, flags)
+            CG.CGEventPost(CG.kCGHIDEventTap, up_event)
+    else:
+        logger.warning("Quartz unavailable; cannot post native keycode %d", key_code)
 
 
 class MouseController:
@@ -119,7 +148,7 @@ class MouseController:
             pyautogui.mouseUp(int(cx), int(cy), button='left', _pause=False)
 
     def click(self, x: Optional[float] = None, y: Optional[float] = None):
-        """Performs a single left click."""
+        """Performs a native left click with distinct timestamped down and up events."""
         if x is not None and y is not None:
             cx, cy = self.clamp(x, y)
             self.current_x = cx
@@ -129,6 +158,7 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
+            now_ns = int(time.time() * 1e9)
             down_event = CG.CGEventCreateMouseEvent(
                 None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft
             )
@@ -136,14 +166,17 @@ class MouseController:
                 None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft
             )
             if down_event and up_event:
+                CG.CGEventSetTimestamp(down_event, now_ns)
+                CG.CGEventSetTimestamp(up_event, now_ns + 10000000)
+                CG.CGEventSetIntegerValueField(down_event, CG.kCGMouseEventClickState, 1)
+                CG.CGEventSetIntegerValueField(up_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventPost(CG.kCGHIDEventTap, down_event)
-                time.sleep(0.01)
                 CG.CGEventPost(CG.kCGHIDEventTap, up_event)
         else:
             pyautogui.click(int(cx), int(cy), button='left', _pause=False)
 
     def double_click(self, x: Optional[float] = None, y: Optional[float] = None):
-        """Performs a native macOS double click."""
+        """Performs a native macOS double click with distinct timestamps and clickState 1 and 2."""
         if x is not None and y is not None:
             cx, cy = self.clamp(x, y)
             self.current_x = cx
@@ -153,26 +186,31 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
+            now_ns = int(time.time() * 1e9)
             d1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
-            CG.CGEventSetIntegerValueField(d1, CG.kCGMouseEventClickState, 1)
-            CG.CGEventSetIntegerValueField(u1, CG.kCGMouseEventClickState, 1)
-            CG.CGEventPost(CG.kCGHIDEventTap, d1)
-            CG.CGEventPost(CG.kCGHIDEventTap, u1)
-
-            time.sleep(0.04)
-
             d2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
+
+            CG.CGEventSetTimestamp(d1, now_ns)
+            CG.CGEventSetTimestamp(u1, now_ns + 15000000)
+            CG.CGEventSetTimestamp(d2, now_ns + 30000000)
+            CG.CGEventSetTimestamp(u2, now_ns + 45000000)
+
+            CG.CGEventSetIntegerValueField(d1, CG.kCGMouseEventClickState, 1)
+            CG.CGEventSetIntegerValueField(u1, CG.kCGMouseEventClickState, 1)
             CG.CGEventSetIntegerValueField(d2, CG.kCGMouseEventClickState, 2)
             CG.CGEventSetIntegerValueField(u2, CG.kCGMouseEventClickState, 2)
+
+            CG.CGEventPost(CG.kCGHIDEventTap, d1)
+            CG.CGEventPost(CG.kCGHIDEventTap, u1)
             CG.CGEventPost(CG.kCGHIDEventTap, d2)
             CG.CGEventPost(CG.kCGHIDEventTap, u2)
         else:
             pyautogui.doubleClick(int(cx), int(cy), _pause=False)
 
     def right_click(self, x: Optional[float] = None, y: Optional[float] = None):
-        """Performs a native macOS right click."""
+        """Performs a native macOS right click without blocking sleeps."""
         if x is not None and y is not None:
             cx, cy = self.clamp(x, y)
             self.current_x = cx
@@ -182,6 +220,7 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
+            now_ns = int(time.time() * 1e9)
             down_event = CG.CGEventCreateMouseEvent(
                 None, CG.kCGEventRightMouseDown, loc, CG.kCGMouseButtonRight
             )
@@ -189,10 +228,15 @@ class MouseController:
                 None, CG.kCGEventRightMouseUp, loc, CG.kCGMouseButtonRight
             )
             if down_event and up_event:
+                CG.CGEventSetTimestamp(down_event, now_ns)
+                CG.CGEventSetTimestamp(up_event, now_ns + 10000000)
+                CG.CGEventSetIntegerValueField(down_event, CG.kCGMouseEventClickState, 1)
+                CG.CGEventSetIntegerValueField(up_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventPost(CG.kCGHIDEventTap, down_event)
-                time.sleep(0.01)
                 CG.CGEventPost(CG.kCGHIDEventTap, up_event)
         else:
+            pyautogui.click(int(cx), int(cy), button='right', _pause=False)
+            pyautogui.click(int(cx), int(cy), button='right', _pause=False)
             pyautogui.click(int(cx), int(cy), button='right', _pause=False)
 
     def scroll(self, dy: int, dx: int = 0, x: Optional[float] = None, y: Optional[float] = None):
@@ -237,19 +281,19 @@ class MouseController:
             pyautogui.scroll(int(dy), x=int(cx), y=int(cy), _pause=False)
 
     def switch_space_left(self):
-        """Move to the Left desktop space (Control + Left Arrow)."""
+        """Move to the Left desktop space (Control + Left Arrow) via macOS System Events."""
         threading.Thread(target=_run_system_keystroke, args=(123,), daemon=True).start()
 
     def switch_space_right(self):
-        """Move to the Right desktop space (Control + Right Arrow)."""
+        """Move to the Right desktop space (Control + Right Arrow) via macOS System Events."""
         threading.Thread(target=_run_system_keystroke, args=(124,), daemon=True).start()
 
     def trigger_mission_control(self):
-        """Triggers Mission Control (Control + Up Arrow)."""
+        """Triggers Mission Control (Control + Up Arrow) via macOS System Events."""
         threading.Thread(target=_run_system_keystroke, args=(126,), daemon=True).start()
 
     def trigger_app_expose(self):
-        """Triggers Application Windows / App Exposé (Control + Down Arrow)."""
+        """Triggers Application Windows / App Exposé (Control + Down Arrow) via macOS System Events."""
         threading.Thread(target=_run_system_keystroke, args=(125,), daemon=True).start()
 
     # macOS Virtual Keycodes for Zoom
@@ -258,33 +302,19 @@ class MouseController:
 
     def zoom(self, direction: str, steps: int = 1):
         """
-        Simulates macOS Command + Plus (Zoom In) or Command + Minus (Zoom Out).
+        Simulates macOS Command + Plus (Zoom In) or Command + Minus (Zoom Out) natively.
         direction: 'in' or 'out'
         steps: number of zoom keystrokes to fire
         """
         keycode = self.KEY_PLUS if direction.lower() == "in" else self.KEY_MINUS
+        cmd_flag = CG.kCGEventFlagMaskCommand if self.quartz_available else 0
 
-        if self.quartz_available:
-            for _ in range(steps):
-                down_event = CG.CGEventCreateKeyboardEvent(None, keycode, True)
-                if down_event:
-                    CG.CGEventSetFlags(down_event, CG.kCGEventFlagMaskCommand)
-                    CG.CGEventPost(CG.kCGHIDEventTap, down_event)
-
-                up_event = CG.CGEventCreateKeyboardEvent(None, keycode, False)
-                if up_event:
-                    CG.CGEventSetFlags(up_event, CG.kCGEventFlagMaskCommand)
-                    CG.CGEventPost(CG.kCGHIDEventTap, up_event)
-
-                time.sleep(0.03)
-        else:
-            key_char = '=' if direction.lower() == "in" else '-'
-            for _ in range(steps):
-                pyautogui.hotkey('command', key_char, _pause=False)
-                time.sleep(0.03)
+        for _ in range(steps):
+            post_keyboard_event(keycode, cmd_flag)
 
     def trigger_shortcut(self, action_id: str):
         """Dispatches keyboard shortcuts defined in the radial menu system."""
+        from src.control.radial_menu import execute_radial_action
         execute_radial_action(action_id)
 
     def release_all(self):

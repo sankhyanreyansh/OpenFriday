@@ -96,12 +96,18 @@ class CursorSmoother:
         self.initialized = False
 
     def update_params(self, min_cutoff: float, beta: float, d_cutoff: Optional[float] = None):
-        """Updates filter sensitivity parameters."""
+        """Updates filter sensitivity parameters without resetting historical tracking state."""
         self.min_cutoff = float(min_cutoff)
         self.beta = float(beta)
         if d_cutoff is not None:
             self.d_cutoff = float(d_cutoff)
-        self.initialized = False
+        if self.initialized:
+            self.filter_x.min_cutoff = self.min_cutoff
+            self.filter_x.beta = self.beta
+            self.filter_x.d_cutoff = self.d_cutoff
+            self.filter_y.min_cutoff = self.min_cutoff
+            self.filter_y.beta = self.beta
+            self.filter_y.d_cutoff = self.d_cutoff
 
 
 # Backwards compatibility

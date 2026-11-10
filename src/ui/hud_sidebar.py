@@ -87,6 +87,8 @@ class GlassmorphicStatusPill(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
 
         self.is_tracking_active = True
+        self._last_display_text = ""
+        self._last_color = ""
         self._build_ui()
 
         self.setFixedSize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
@@ -142,12 +144,30 @@ class GlassmorphicStatusPill(QWidget):
         self.is_tracking_active = not self.is_tracking_active
         if self.is_tracking_active:
             self.mini_pause_btn.setText("⏸")
+            self._update_label("● READY", "#E4E4E7")
         else:
             self.mini_pause_btn.setText("▶")
-            self.pill_status_lbl.setText("● PAUSED")
-            self.pill_status_lbl.setStyleSheet("color: #71717A; font-weight: 500; font-size: 12px;")
+            self._update_label("● PAUSED", "#71717A")
 
         self.master_toggle_requested.emit(self.is_tracking_active)
+
+    def on_status_changed(self, message: str):
+        """Displays system status or error messages from the vision engine."""
+        if not self.is_tracking_active:
+            return
+        msg_upper = message.upper()
+        color = "#F87171" if ("ERROR" in msg_upper or "FAILED" in msg_upper) else "#A1A1AA"
+        self._update_label(f"● {msg_upper}", color)
+
+    def _update_label(self, text: str, color: str):
+        """Applies label text and styling with dirty checks to avoid redundant Qt re-styling."""
+        if text != self._last_display_text:
+            self.pill_status_lbl.setText(text)
+            self._last_display_text = text
+
+        if color != self._last_color:
+            self.pill_status_lbl.setStyleSheet(f"color: {color}; font-weight: 500; font-size: 12px;")
+            self._last_color = color
 
     def update_gesture_data(self, data: GestureData):
         """Updates live status indicator with current gesture state and modifier presence."""
@@ -182,8 +202,6 @@ class GlassmorphicStatusPill(QWidget):
         else:
             display_text = f"● {state_text}"
 
-        self.pill_status_lbl.setText(display_text)
-
         if state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.RADIAL_MENU, GestureState.ZOOM):
             color = "#E4E4E7"
         elif state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.SCROLLING):
@@ -191,7 +209,7 @@ class GlassmorphicStatusPill(QWidget):
         else:
             color = "#A1A1AA"
 
-        self.pill_status_lbl.setStyleSheet(f"color: {color}; font-weight: 500; font-size: 12px;")
+        self._update_label(display_text, color)
 
 
 # Backward-compatible alias

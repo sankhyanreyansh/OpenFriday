@@ -8,6 +8,7 @@ Velocity-Adaptive Kinematic Smoothing, and 60 FPS multi-threaded vision pipeline
 import sys
 import signal
 import argparse
+import logging
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PyQt6.QtGui import QAction
@@ -19,6 +20,13 @@ from src.ui.overlay_window import TransparentOverlay
 from src.ui.hud_sidebar import GlassmorphicStatusPill
 from config import load_config
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("OpenFriday")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Open FRIDAY - macOS Hand Gesture Desktop Controller")
@@ -27,25 +35,33 @@ def main():
     parser.add_argument("--no-sidebar", action="store_true", help="Disable glassmorphic HUD pill")
     args = parser.parse_args()
 
-    print("Initializing Open FRIDAY...")
+    logger.info("Initializing Open FRIDAY...")
 
     try:
         config_settings = load_config()
         cam_id = args.camera if args.camera is not None else int(config_settings.get("camera_id", 0))
-
-        # 0. Configure macOS Accessory Activation Policy (Agent mode for Spaces persistence)
-        permissions.set_macos_accessory_policy()
 
         QApplication.setApplicationName("Open FRIDAY")
         QApplication.setOrganizationName("Open FRIDAY")
         app = QApplication(sys.argv)
         app.setQuitOnLastWindowClosed(False)
 
+        # Configure macOS Accessory Activation Policy (Agent mode for Spaces persistence)
         permissions.set_macos_accessory_policy()
 
-        # Permission Diagnostics (Trigger system prompt if accessibility not granted)
+        # Permission Diagnostics Preflight Gate
         if not permissions.is_accessibility_granted():
+            logger.warning("macOS Accessibility permission is not yet granted.")
             permissions.request_accessibility_permission()
+            print("\n" + "=" * 65)
+            print("⚠️  [PERMISSION REQUIRED] macOS Accessibility Permission Missing")
+            print("   Open FRIDAY needs Accessibility access to move cursor & click.")
+            print("   Please grant permission in System Settings -> Privacy & Security -> Accessibility.")
+            print("=" * 65 + "\n")
+
+        cam_ok, cam_msg = permissions.check_camera_access()
+        if not cam_ok:
+            logger.warning("Camera check warning: %s", cam_msg)
 
         # 1. Initialize Controller & Windows
         mouse_ctrl = MouseController()
@@ -66,6 +82,7 @@ def main():
         # 3. Wire Qt Signal Connections
         if hud_pill:
             vision_thread.gesture_updated.connect(hud_pill.update_gesture_data)
+            vision_thread.status_changed.connect(hud_pill.on_status_changed)
             hud_pill.master_toggle_requested.connect(lambda active: setattr(vision_thread, 'tracking_enabled', active))
 
         if reticle_overlay:
@@ -102,9 +119,10 @@ def main():
             hud_pill.show()
             hud_pill.raise_()
 
-        print("Open FRIDAY launched successfully.")
+        logger.info("Open FRIDAY launched successfully.")
 
         def cleanup():
+            logger.info("Shutting down Open FRIDAY...")
             vision_thread.stop()
             mouse_ctrl.release_all()
             if reticle_overlay:
@@ -119,7 +137,7 @@ def main():
         sys.exit(app.exec())
 
     except Exception as e:
-        print(f"Open FRIDAY failed to launch: {e}")
+        logger.exception("Open FRIDAY failed to launch: %s", e)
         sys.exit(1)
 
 

@@ -6,6 +6,7 @@ MediaPipe Hand Landmarker tracking, kinematic cursor filtering, and gesture disp
 import os
 import time
 import math
+import logging
 import urllib.request
 import threading
 from typing import Optional, Tuple, Any
@@ -27,6 +28,8 @@ from src.vision.gesture_recognizer import (
 from src.vision.landmark_smoother import LandmarkSmoother
 from src.vision.one_euro_filter import CursorSmoother
 
+logger = logging.getLogger("OpenFriday.VisionEngine")
+
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task"
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ROOT_MODEL_PATH = os.path.join(ROOT_DIR, "hand_landmarker.task")
@@ -37,12 +40,12 @@ DEFAULT_MODEL_PATH = ROOT_MODEL_PATH if os.path.exists(ROOT_MODEL_PATH) else LOC
 def ensure_model_file(model_path: str = DEFAULT_MODEL_PATH) -> str:
     """Ensures hand landmarker task model file is present locally."""
     if not os.path.exists(model_path):
-        print(f"Downloading hand landmarker model to {model_path}...")
+        logger.info("Downloading hand landmarker model to %s...", model_path)
         try:
             urllib.request.urlretrieve(MODEL_URL, model_path)
-            print(f"Model downloaded successfully ({os.path.getsize(model_path)} bytes).")
+            logger.info("Model downloaded successfully (%d bytes).", os.path.getsize(model_path))
         except Exception as e:
-            print(f"Error downloading model: {e}")
+            logger.error("Error downloading model: %s", e)
     return model_path
 
 
@@ -64,7 +67,7 @@ class CameraGrabber(threading.Thread):
     def start_capture(self) -> bool:
         self.cap = cv2.VideoCapture(self.camera_id)
         if not self.cap.isOpened():
-            print(f"[ERROR] Could not open camera {self.camera_id}")
+            logger.error("Could not open camera device %d", self.camera_id)
             return False
 
         # Request 60 FPS and 720p resolution
@@ -166,10 +169,14 @@ class VisionEngine(QThread):
             self.margin_y = float(settings["margin_y"])
         if "scroll_sensitivity" in settings:
             self.gesture_recognizer.scroll_sensitivity = float(settings["scroll_sensitivity"])
+        if "pinch_start_threshold" in settings:
+            self.gesture_recognizer.pinch_start_threshold = float(settings["pinch_start_threshold"])
+        if "pinch_release_threshold" in settings:
+            self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_release_threshold"])
 
-        min_cutoff = settings.get("min_cutoff", 1.0)
-        beta = settings.get("beta", 0.025)
-        self.cursor_smoother = CursorSmoother(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.5)
+        min_cutoff = float(settings.get("min_cutoff", 1.0))
+        beta = float(settings.get("beta", 0.025))
+        self.cursor_smoother.update_params(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.5)
 
     def dismiss_radial_menu(self):
         """Manually dismisses the radial shortcut wheel."""
@@ -189,11 +196,11 @@ class VisionEngine(QThread):
         return sx, sy
 
     def _init_landmarker(self) -> vision.HandLandmarker:
-        """Initializes the MediaPipe HandLandmarker in IMAGE mode."""
+        """Initializes the MediaPipe HandLandmarker in VIDEO mode for tracking reuse across frames."""
         base_options = mp_python.BaseOptions(model_asset_path=self.model_path)
         options = vision.HandLandmarkerOptions(
             base_options=base_options,
-            running_mode=vision.RunningMode.IMAGE,
+            running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.55,
             min_hand_presence_confidence=0.55,
@@ -291,7 +298,7 @@ class VisionEngine(QThread):
 
         self.grabber = CameraGrabber(self.camera_id)
         if not self.grabber.start_capture():
-            self.status_changed.emit("Failed to open camera. Check permissions.")
+            self.status_changed.emit("Camera Error: Check Permissions")
             self.running = False
             return
 
@@ -300,13 +307,14 @@ class VisionEngine(QThread):
         try:
             landmarker = self._init_landmarker()
         except Exception as e:
-            print(f"Error creating HandLandmarker: {e}")
+            logger.exception("Error creating HandLandmarker: %s", e)
             self.status_changed.emit(f"Landmarker init failed: {e}")
             self.grabber.stop()
             self.running = False
             return
 
         prev_time = time.time()
+        last_timestamp_ms = 0
         fps_smoothing = 0.0
 
         try:
@@ -334,7 +342,14 @@ class VisionEngine(QThread):
                 # Inference Downsampling: 640x360 cuts inference CPU compute in half
                 infer_frame = cv2.resize(rgb_frame, (640, 360), interpolation=cv2.INTER_LINEAR)
                 mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=infer_frame)
-                result = landmarker.detect(mp_image)
+
+                # VIDEO Mode: reuse tracked bounding boxes across frames with monotonic millisecond timestamps
+                timestamp_ms = int(now * 1000)
+                if timestamp_ms <= last_timestamp_ms:
+                    timestamp_ms = last_timestamp_ms + 1
+                last_timestamp_ms = timestamp_ms
+
+                result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 right_hand_landmarks = None
                 left_hand_landmarks = None
@@ -432,7 +447,8 @@ class VisionEngine(QThread):
                 self.fps_updated.emit(fps_smoothing)
 
         except Exception as run_err:
-            print(f"[VISION ENGINE ERROR] Run loop exception: {run_err}")
+            logger.exception("Vision engine run loop exception: %s", run_err)
+            self.status_changed.emit(f"Vision Error: {run_err}")
         finally:
             try:
                 landmarker.close()

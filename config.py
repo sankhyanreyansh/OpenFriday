@@ -25,7 +25,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Dynamic Filter & Sensitivity Settings
     "min_cutoff": 1.0,
     "beta": 0.025,
-    "pinch_threshold": 0.4,
+    "pinch_start_threshold": 0.38,
+    "pinch_release_threshold": 0.52,
     "scroll_sensitivity": 1.0,
 
     # HUD Overlays

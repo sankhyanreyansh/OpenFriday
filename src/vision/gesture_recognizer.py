@@ -95,8 +95,9 @@ class GestureRecognizer:
 
         # Timing and travel thresholds
         self.tap_max_time = 0.35          # Tap duration < 350ms
-        self.drag_dist_threshold = 28.0   # Spatial travel threshold for drag (28px prevents hand flex on clicks)
-        self.double_click_window = 0.40   # Double-tap window (400ms)
+        self.drag_dist_threshold = 38.0   # Spatial travel threshold for drag (38px isolates clicks from drags)
+        self.double_click_window = 0.55   # Double-tap window (550ms for natural air double-taps)
+        self.double_click_dist = 60.0     # Spatial tolerance between two air taps (60px)
 
         # State tracking
         self.is_pinching = False
@@ -818,22 +819,21 @@ class GestureRecognizer:
                 self.is_pinching = False
                 self.is_dragging = False
 
-                # Quick release with modest movement is ALWAYS a click, never drag!
-                # Only treat as drag release if it was a deliberate, sustained drag
-                if was_dragging and (dist_moved > 36.0 or pinch_dur > 0.38):
+                # Only treat as drag release if it was a genuine deliberate drag beyond the drag distance threshold
+                if was_dragging and dist_moved > self.drag_dist_threshold:
                     # Drag completed and released
                     current_action = GestureState.POINTING
                     status_msg = "Drag Released"
                     effective_x, effective_y = sx, sy
                 else:
-                    # Released without travel -> Trigger Click
+                    # Released without deliberate drag -> Trigger Click
                     if self.pinch_start_modifier or is_modifier_active:
                         current_action = GestureState.RIGHT_CLICK
                         status_msg = "[SHIFT] Right Click"
                     else:
                         time_since_last_tap = now - self.last_tap_time
                         tap_dist = math.hypot(self.pinch_freeze_x - self.last_tap_x, self.pinch_freeze_y - self.last_tap_y)
-                        if time_since_last_tap < self.double_click_window and tap_dist < 45.0:
+                        if time_since_last_tap < self.double_click_window and tap_dist < self.double_click_dist:
                             current_action = GestureState.DOUBLE_CLICK
                             status_msg = "Double Click"
                             self.last_tap_time = 0.0
@@ -849,8 +849,8 @@ class GestureRecognizer:
                 # --- PINCH HELD ---
                 # STRICT RULE: Dragging is ONLY allowed when Left Hand modifier is NOT up!
                 if not is_modifier_active and not self.pinch_start_modifier:
-                    # Deliberate spatial drag: requires travel > 28px or sustained hold movement (> 16px after 180ms)
-                    if dist_moved > self.drag_dist_threshold or (pinch_dur > 0.18 and dist_moved > 16.0):
+                    # Deliberate spatial drag: requires travel > 38px, OR sustained hold > 350ms AND movement > 28px
+                    if dist_moved > self.drag_dist_threshold or (pinch_dur > 0.35 and dist_moved > 28.0):
                         self.is_dragging = True
 
                 if self.is_dragging:
