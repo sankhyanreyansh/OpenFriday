@@ -8,6 +8,8 @@ All shortcuts are dispatched natively via macOS Quartz CoreGraphics with zero su
 
 from typing import List, Dict, Any, Optional
 
+from src.control.keystrokes import post_keyboard_event
+
 try:
     import Quartz.CoreGraphics as CG
     QUARTZ_AVAILABLE = True
@@ -65,7 +67,6 @@ def execute_radial_action(action_id: str) -> bool:
                     elif flag_type == "option":
                         flags = CG.kCGEventFlagMaskAlternate
 
-                from src.control.mouse_controller import post_keyboard_event
                 post_keyboard_event(key_code, flags)
                 return True
     return False

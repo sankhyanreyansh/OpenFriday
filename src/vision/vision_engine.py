@@ -20,6 +20,7 @@ from mediapipe.tasks.python import vision
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from src.control.mouse_controller import MouseController
+from src.control import permissions
 from src.vision.gesture_recognizer import (
     GestureRecognizer,
     GestureState,
@@ -298,6 +299,8 @@ class VisionEngine(QThread):
 
         self.grabber = CameraGrabber(self.camera_id)
         if not self.grabber.start_capture():
+            logger.error("Could not access camera %d. Opening macOS Camera Settings...", self.camera_id)
+            permissions.open_camera_settings()
             self.status_changed.emit("Camera Error: Check Permissions")
             self.running = False
             return

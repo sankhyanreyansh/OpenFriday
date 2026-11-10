@@ -819,14 +819,14 @@ class GestureRecognizer:
                 self.is_pinching = False
                 self.is_dragging = False
 
-                # Only treat as drag release if it was a genuine deliberate drag beyond the drag distance threshold
-                if was_dragging and dist_moved > self.drag_dist_threshold:
+                # If drag was engaged, always release drag cleanly (even if hand returned near origin)
+                if was_dragging:
                     # Drag completed and released
                     current_action = GestureState.POINTING
                     status_msg = "Drag Released"
                     effective_x, effective_y = sx, sy
                 else:
-                    # Released without deliberate drag -> Trigger Click
+                    # Released without initiating a drag -> Trigger Click
                     if self.pinch_start_modifier or is_modifier_active:
                         current_action = GestureState.RIGHT_CLICK
                         status_msg = "[SHIFT] Right Click"

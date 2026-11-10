@@ -53,15 +53,14 @@ def main():
         if not permissions.is_accessibility_granted():
             logger.warning("macOS Accessibility permission is not yet granted.")
             permissions.request_accessibility_permission()
+            permissions.open_accessibility_settings()
             print("\n" + "=" * 65)
             print("⚠️  [PERMISSION REQUIRED] macOS Accessibility Permission Missing")
             print("   Open FRIDAY needs Accessibility access to move cursor & click.")
-            print("   Please grant permission in System Settings -> Privacy & Security -> Accessibility.")
+            print("   Opened System Settings -> Privacy & Security -> Accessibility.")
+            print("   Please grant permission and relaunch Open FRIDAY.")
             print("=" * 65 + "\n")
-
-        cam_ok, cam_msg = permissions.check_camera_access()
-        if not cam_ok:
-            logger.warning("Camera check warning: %s", cam_msg)
+            sys.exit(1)
 
         # 1. Initialize Controller & Windows
         mouse_ctrl = MouseController()

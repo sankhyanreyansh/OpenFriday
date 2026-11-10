@@ -105,6 +105,7 @@ class TransparentOverlay(QWidget):
         # Click ripples & animation timer
         self.ripples: List[ClickRipple] = []
         self.prev_state = GestureState.NONE
+        self._needs_repaint = True
 
         self.anim_timer = QTimer(self)
         self.anim_timer.timeout.connect(self.update_animation)
@@ -123,9 +124,24 @@ class TransparentOverlay(QWidget):
             self.show_reticle = bool(settings["show_reticle"])
         if "show_pinch_meter" in settings:
             self.show_pinch_meter = bool(settings["show_pinch_meter"])
+        self._needs_repaint = True
 
     def update_gesture_data(self, data: GestureData):
         """Updates internal state and triggers ripple animations on clicks."""
+        coords_changed = (
+            abs(self.cursor_x - data.screen_x) > 0.5 or
+            abs(self.cursor_y - data.screen_y) > 0.5
+        )
+        state_changed = (
+            self.current_state != data.state or
+            self.is_tracking != data.is_tracking or
+            self.is_modifier_active != data.is_modifier_active or
+            self.active_radial_sector != data.radial_sector or
+            abs(self.pinch_progress - data.pinch_progress) > 0.02
+        )
+        if coords_changed or state_changed:
+            self._needs_repaint = True
+
         self.cursor_x = data.screen_x
         self.cursor_y = data.screen_y
         self.is_tracking = data.is_tracking
@@ -143,13 +159,15 @@ class TransparentOverlay(QWidget):
             elif self.current_state == GestureState.RIGHT_CLICK:
                 self.ripples.append(ClickRipple(self.cursor_x, self.cursor_y, QColor(212, 212, 216), 40.0, 0.28))
             self.prev_state = self.current_state
+            self._needs_repaint = True
 
     def update_animation(self):
-        """Advances ripple animations and repaints."""
+        """Advances ripple animations and repaints if dirty or ripples are active."""
         if self.ripples:
             self.ripples = [r for r in self.ripples if r.is_alive()]
             self.update()
-        elif self.is_tracking or self.current_state == GestureState.RADIAL_MENU:
+        elif self._needs_repaint:
+            self._needs_repaint = False
             self.update()
 
     def paintEvent(self, event):

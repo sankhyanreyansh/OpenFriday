@@ -62,23 +62,23 @@ def open_camera_settings():
         print(f"Error opening camera settings: {e}")
 
 
-def check_camera_access() -> Tuple[bool, str]:
+def check_camera_access(camera_id: int = 0) -> Tuple[bool, str]:
     """
-    Tests if a camera can be opened locally.
+    Tests if the specified camera can be opened locally.
     """
     try:
         import cv2
-        cap = cv2.VideoCapture(0)
+        cap = cv2.VideoCapture(camera_id)
         if cap is None or not cap.isOpened():
             if cap:
                 cap.release()
-            return False, "Could not open camera 0. Grant Camera permission in macOS System Settings."
+            return False, f"Could not open camera {camera_id}. Grant Camera permission in macOS System Settings."
         ret, frame = cap.read()
         cap.release()
         if ret and frame is not None and frame.size > 0:
-            return True, "Camera accessible."
+            return True, f"Camera {camera_id} accessible."
         else:
-            return False, "Camera opened but failed to capture frame."
+            return False, f"Camera {camera_id} opened but failed to capture frame."
     except Exception as e:
         return False, f"Camera check error: {e}"
 

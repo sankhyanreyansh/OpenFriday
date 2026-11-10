@@ -301,3 +301,50 @@ def test_deliberate_drag_sequence():
     assert res_rel.state != GestureState.CLICK, "Accidentally triggered click on drag release!"
     assert res_rel.state == GestureState.POINTING
     assert res_rel.status_message == "Drag Released"
+
+
+def test_drag_release_returning_to_origin():
+    """
+    Regression Test: If a drag was engaged and moved >42px, but the user returns
+    the hand to within 10px of the pinch origin before releasing, it must STILL
+    release as a drag (POINTING, 'Drag Released') and NEVER fire an accidental click!
+    """
+    gr = GestureRecognizer()
+    t = 100.0
+
+    lms_open = create_pointing_hand()
+    lms_pinch = create_pinched_hand()
+
+    # 1. Start pinch at (200, 200)
+    gr.process(lms_open, (200.0, 200.0), now=t)
+    t += 0.02
+    res = gr.process(lms_pinch, (200.0, 200.0), now=t)
+    assert res.state == GestureState.PINCHING
+
+    # 2. Drag outwards to (280, 260) (>100px travel)
+    for step in range(15):
+        t += 0.016
+        x = 200.0 + (step * 5.3)
+        y = 200.0 + (step * 4.0)
+        res = gr.process(lms_pinch, (x, y), now=t)
+
+    assert res.state == GestureState.DRAGGING, "Failed to enter DRAGGING state"
+
+    # 3. Drag back to (205, 203) - distance from original freeze (200, 200) is only ~5.8px (< drag_dist_threshold)
+    for step in range(15):
+        t += 0.016
+        x = 280.0 - (step * 5.0)
+        y = 260.0 - (step * 3.8)
+        res = gr.process(lms_pinch, (x, y), now=t)
+
+    assert res.state == GestureState.DRAGGING, "Must remain in DRAGGING state until pinch release"
+
+    # 4. Release pinch near origin
+    t += 0.02
+    res_rel = gr.process(lms_open, (205.0, 203.0), now=t)
+
+    # CRITICAL: Must be Drag Released, NOT Click or Double Click!
+    assert res_rel.state != GestureState.CLICK, "Bug: returning to origin triggered Left Click!"
+    assert res_rel.state != GestureState.DOUBLE_CLICK, "Bug: returning to origin triggered Double Click!"
+    assert res_rel.state == GestureState.POINTING
+    assert res_rel.status_message == "Drag Released"

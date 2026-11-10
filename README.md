@@ -28,8 +28,8 @@ FRIDAY uses a **Dual-Hand Asymmetric Architecture**:
 ## ⚡ Architecture & Performance Highlights
 
 * **MediaPipe Video Tracking**: Operates in `RunningMode.VIDEO`, reusing hand bounding boxes across frames for 20–40% lower CPU usage and higher landmark stability.
-* **Pure Quartz CoreGraphics Keystrokes**: Space switching and shortcuts dispatch directly into the macOS Window Server via `CGEventPost` with zero subprocess/`osascript` overhead (<0.1ms).
-* **Zero-Delay Mouse Events**: Left clicks, double clicks, and right clicks use native Quartz `kCGMouseEventClickState` flags without blocking sleeps, guaranteeing 0 dropped video frames.
+* **Native CoreGraphics & Ordered System Events**: Shortcuts (Radial menu, Zoom) dispatch via Quartz `CGEventPost` with sub-millisecond latency. Space switching and Mission Control execute via dedicated FIFO-queued macOS System Events via AppleScript, as macOS WindowServer intentionally filters out synthetic CGEvents for Dock/Spaces hotkeys.
+* **Zero-Delay Mouse Events**: Left clicks, double clicks, and right clicks use native Quartz `kCGMouseEventClickState` flags with monotonic boot timestamps (`time.monotonic_ns()`) and without blocking sleeps, guaranteeing 0 dropped video frames.
 * **Apex Inflection Swipe Engine**: Rapid successive 3-finger space flicks (e.g. Left $\rightarrow$ Left $\rightarrow$ Left) are evaluated from the motion turnaround point (apex), completely eliminating history dilution while suppressing opposite recoil bounce-back.
 * **1€ Dynamic Velocity Filtering**: Adaptive cutoff filtering ensures rock-solid stationary pointing jitter reduction with zero lag during high-speed flicks.
 * **Glassmorphic Status Pill**: Real-time status indicator floating in the top right of the desktop with dirty-state styling optimizations to avoid Qt stylesheet re-parsing.

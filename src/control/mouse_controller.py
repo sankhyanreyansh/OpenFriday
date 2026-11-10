@@ -8,8 +8,12 @@ zoom, and radial shortcut execution directly into the macOS Window Server.
 import time
 import subprocess
 import threading
+import queue
 import logging
 from typing import Tuple, Optional
+
+from src.control.keystrokes import post_keyboard_event, KEY_PLUS, KEY_MINUS
+from src.control.radial_menu import execute_radial_action
 
 try:
     import Quartz.CoreGraphics as CG
@@ -22,39 +26,44 @@ except ImportError:
 
 logger = logging.getLogger("OpenFriday.MouseController")
 
+# Dedicated FIFO queue & worker for macOS Spaces & Mission Control events
+# Guarantees sequential execution so rapid successive flicks never race or complete out of order
+_system_keystroke_queue: "queue.Queue[int]" = queue.Queue()
+
+
+def _system_keystroke_worker():
+    """
+    Dedicated FIFO background worker for system keystrokes (Spaces / Mission Control).
+    Processes keystrokes sequentially so rapid successive flicks never race or execute out of order.
+    """
+    while True:
+        key_code = _system_keystroke_queue.get()
+        try:
+            # macOS intentionally filters out synthetic CGEvents for Mission Control / Spaces switching;
+            # AppleScript via System Events is the officially sanctioned and working mechanism.
+            script = f'tell application "System Events" to key code {key_code} using control down'
+            subprocess.run(
+                ["osascript", "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2.0
+            )
+        except Exception as e:
+            logger.warning("Error running system keystroke %s: %s", key_code, e)
+        finally:
+            _system_keystroke_queue.task_done()
+
+
+_keystroke_thread = threading.Thread(target=_system_keystroke_worker, daemon=True, name="SystemKeystrokeWorker")
+_keystroke_thread.start()
+
 
 def _run_system_keystroke(key_code: int):
     """
-    Dispatches Control + KeyCode reliably to macOS System Events / WindowServer.
-    macOS intentionally filters out synthetic CGEvents for Mission Control / Spaces switching;
-    AppleScript via System Events is the officially sanctioned and working mechanism.
+    Enqueues Control + KeyCode for reliable, ordered dispatch to macOS System Events.
+    Non-blocking O(1) enqueue on the calling thread.
     """
-    script = f'tell application "System Events" to key code {key_code} using control down'
-    subprocess.Popen(["osascript", "-e", script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def post_keyboard_event(key_code: int, flags: int = 0):
-    """
-    Dispatches a native key down + key up event directly into the macOS Window Server.
-    Zero subprocess overhead (<0.1ms) and requires only Accessibility permission.
-    """
-    if QUARTZ_AVAILABLE:
-        now_ns = int(time.time() * 1e9)
-        down_event = CG.CGEventCreateKeyboardEvent(None, key_code, True)
-        if down_event:
-            CG.CGEventSetTimestamp(down_event, now_ns)
-            if flags:
-                CG.CGEventSetFlags(down_event, flags)
-            CG.CGEventPost(CG.kCGHIDEventTap, down_event)
-
-        up_event = CG.CGEventCreateKeyboardEvent(None, key_code, False)
-        if up_event:
-            CG.CGEventSetTimestamp(up_event, now_ns + 15000000)
-            if flags:
-                CG.CGEventSetFlags(up_event, flags)
-            CG.CGEventPost(CG.kCGHIDEventTap, up_event)
-    else:
-        logger.warning("Quartz unavailable; cannot post native keycode %d", key_code)
+    _system_keystroke_queue.put(key_code)
 
 
 class MouseController:
@@ -158,7 +167,7 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
-            now_ns = int(time.time() * 1e9)
+            now_ns = time.monotonic_ns()
             down_event = CG.CGEventCreateMouseEvent(
                 None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft
             )
@@ -167,7 +176,7 @@ class MouseController:
             )
             if down_event and up_event:
                 CG.CGEventSetTimestamp(down_event, now_ns)
-                CG.CGEventSetTimestamp(up_event, now_ns + 10000000)
+                CG.CGEventSetTimestamp(up_event, now_ns + 10_000_000)
                 CG.CGEventSetIntegerValueField(down_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventSetIntegerValueField(up_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventPost(CG.kCGHIDEventTap, down_event)
@@ -186,16 +195,16 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
-            now_ns = int(time.time() * 1e9)
+            now_ns = time.monotonic_ns()
             d1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u1 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
             d2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseDown, loc, CG.kCGMouseButtonLeft)
             u2 = CG.CGEventCreateMouseEvent(None, CG.kCGEventLeftMouseUp, loc, CG.kCGMouseButtonLeft)
 
             CG.CGEventSetTimestamp(d1, now_ns)
-            CG.CGEventSetTimestamp(u1, now_ns + 15000000)
-            CG.CGEventSetTimestamp(d2, now_ns + 30000000)
-            CG.CGEventSetTimestamp(u2, now_ns + 45000000)
+            CG.CGEventSetTimestamp(u1, now_ns + 15_000_000)
+            CG.CGEventSetTimestamp(d2, now_ns + 30_000_000)
+            CG.CGEventSetTimestamp(u2, now_ns + 45_000_000)
 
             CG.CGEventSetIntegerValueField(d1, CG.kCGMouseEventClickState, 1)
             CG.CGEventSetIntegerValueField(u1, CG.kCGMouseEventClickState, 1)
@@ -220,7 +229,7 @@ class MouseController:
 
         if self.quartz_available:
             loc = CG.CGPoint(cx, cy)
-            now_ns = int(time.time() * 1e9)
+            now_ns = time.monotonic_ns()
             down_event = CG.CGEventCreateMouseEvent(
                 None, CG.kCGEventRightMouseDown, loc, CG.kCGMouseButtonRight
             )
@@ -229,14 +238,12 @@ class MouseController:
             )
             if down_event and up_event:
                 CG.CGEventSetTimestamp(down_event, now_ns)
-                CG.CGEventSetTimestamp(up_event, now_ns + 10000000)
+                CG.CGEventSetTimestamp(up_event, now_ns + 10_000_000)
                 CG.CGEventSetIntegerValueField(down_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventSetIntegerValueField(up_event, CG.kCGMouseEventClickState, 1)
                 CG.CGEventPost(CG.kCGHIDEventTap, down_event)
                 CG.CGEventPost(CG.kCGHIDEventTap, up_event)
         else:
-            pyautogui.click(int(cx), int(cy), button='right', _pause=False)
-            pyautogui.click(int(cx), int(cy), button='right', _pause=False)
             pyautogui.click(int(cx), int(cy), button='right', _pause=False)
 
     def scroll(self, dy: int, dx: int = 0, x: Optional[float] = None, y: Optional[float] = None):
@@ -282,23 +289,23 @@ class MouseController:
 
     def switch_space_left(self):
         """Move to the Left desktop space (Control + Left Arrow) via macOS System Events."""
-        threading.Thread(target=_run_system_keystroke, args=(123,), daemon=True).start()
+        _run_system_keystroke(123)
 
     def switch_space_right(self):
         """Move to the Right desktop space (Control + Right Arrow) via macOS System Events."""
-        threading.Thread(target=_run_system_keystroke, args=(124,), daemon=True).start()
+        _run_system_keystroke(124)
 
     def trigger_mission_control(self):
         """Triggers Mission Control (Control + Up Arrow) via macOS System Events."""
-        threading.Thread(target=_run_system_keystroke, args=(126,), daemon=True).start()
+        _run_system_keystroke(126)
 
     def trigger_app_expose(self):
         """Triggers Application Windows / App Exposé (Control + Down Arrow) via macOS System Events."""
-        threading.Thread(target=_run_system_keystroke, args=(125,), daemon=True).start()
+        _run_system_keystroke(125)
 
     # macOS Virtual Keycodes for Zoom
-    KEY_PLUS = 0x18
-    KEY_MINUS = 0x1B
+    KEY_PLUS = KEY_PLUS
+    KEY_MINUS = KEY_MINUS
 
     def zoom(self, direction: str, steps: int = 1):
         """
@@ -314,7 +321,6 @@ class MouseController:
 
     def trigger_shortcut(self, action_id: str):
         """Dispatches keyboard shortcuts defined in the radial menu system."""
-        from src.control.radial_menu import execute_radial_action
         execute_radial_action(action_id)
 
     def release_all(self):
