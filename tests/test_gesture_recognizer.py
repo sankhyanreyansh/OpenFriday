@@ -474,8 +474,43 @@ def test_right_hand_up_prevents_dictation_toggle():
         assert res.dictation_event is None, "Dictation must NOT trigger when right hand is also up!"
 
     assert gr.is_dictating is False, "Dictation was incorrectly activated with both hands up!"
-    # Ensure clenched fist does NOT trigger modifier mode (scroll/right-click)
-    assert res.is_modifier_active is False, "Clenched fist should not be treated as a scroll/shift modifier"
+    # Dual-hand mode: left hand presence guarantees modifier mode active (relaxed hand never kills scrolling/right-click)
+    assert res.is_modifier_active is True, "Left hand in dual mode must keep modifier active"
+
+
+def test_raising_right_hand_stops_active_dictation():
+    """Verify that raising right hand (dominant hand) immediately stops active dictation."""
+    gr = GestureRecognizer()
+    fist = create_fist_hand()
+    pointing = create_pointing_hand()
+    t = 50.0
+
+    # 1. Start dictation with left fist alone
+    for _ in range(5):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=fist, now=t)
+
+    assert gr.is_dictating is True
+    assert res.state == GestureState.DICTATION_LISTENING
+
+    # 2. Drop left hand and raise right hand (the natural motion)
+    t += 0.016
+    res = gr.process(pointing, (500.0, 500.0), left_landmarks=None, now=t)
+    assert res.dictation_event == "STOP", "Raising right hand alone must trigger dictation STOP"
+    assert gr.is_dictating is False
+
+    # 3. Start dictation again
+    for _ in range(5):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=fist, now=t)
+
+    assert gr.is_dictating is True
+
+    # 4. Bring up right hand while left hand is still up
+    t += 0.016
+    res = gr.process(pointing, (500.0, 500.0), left_landmarks=fist, now=t)
+    assert res.dictation_event == "STOP", "Bringing up right hand while left hand is up must trigger dictation STOP"
+    assert gr.is_dictating is False
 
 
 def test_radial_menu_selection_copy_paste_backspace():

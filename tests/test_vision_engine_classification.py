@@ -93,17 +93,25 @@ def test_classify_dual_hands_and_centroid_persistence():
     assert left2 is moved_mod, "Centroid tracking must keep modifier hand identity"
 
 
-def test_classify_single_hand_locked_during_dictation():
-    """Verify that during active dictation, a single hand cannot be flipped to right hand by classification noise."""
+def test_single_right_hand_classified_correctly_to_stop_dictation():
+    """Verify that raising a single right hand is classified as dominant hand so dictation stops."""
     ctrl = MouseController()
     engine = VisionEngine(camera_id=0, mouse_controller=ctrl)
     engine.mirror_horizontal = True
 
-    hand = create_hand(0.25, 0.5)
+    # User was dictating with left hand
     engine.gesture_recognizer.is_dictating = True
 
-    # Even if noisy MediaPipe handedness falsely reports dominant label ("Left")
-    right, left = engine._classify_hands([hand], [MockHandedness("Left")])
-    assert right is None, "Active dictation hand must never be flipped into a right hand"
-    assert left is hand, "Single hand must remain locked as left modifier hand during dictation"
+    # User drops left hand and raises right hand (dominant label "Left" in mirrored mode)
+    hand_right = create_hand(0.7, 0.5)
+    right, left = engine._classify_hands([hand_right], [MockHandedness("Left")])
+    assert right is hand_right, "Single right hand must be recognized as dominant hand"
+    assert left is None, "Modifier hand must be None"
+
+    # Verify that passing this right hand to gesture_recognizer immediately triggers STOP
+    gesture_data = engine.gesture_recognizer.process(
+        right, (500.0, 500.0), left_landmarks=None, now=10.0
+    )
+    assert gesture_data.dictation_event == "STOP", "Raising right hand must stop dictation"
+    assert engine.gesture_recognizer.is_dictating is False
 

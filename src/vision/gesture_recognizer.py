@@ -764,13 +764,14 @@ class GestureRecognizer:
             self._is_hand_fully_open(left_landmarks)
         )
 
-        # Modifier is active only if left hand is present AND NOT a clenched fist AND not dictating
-        # Clenched fist is reserved for voice dictation and never triggers scroll, right click, or [SHIFT]
-        is_modifier_active = (
-            has_left_hand and
-            not is_left_fist and
-            not self.is_dictating
-        )
+        # Modifier hand logic:
+        # 1. In dual-hand mode (both hands up), the left hand is ALWAYS the modifier (Shift).
+        #    A relaxed left hand must NEVER kill scrolling or right-click!
+        # 2. In single-hand mode (only left hand up), modifier is active ONLY if not dictating and not a fist.
+        if has_right_hand:
+            is_modifier_active = has_left_hand
+        else:
+            is_modifier_active = has_left_hand and not is_left_fist and not self.is_dictating
 
         # 0. Voice Dictation Hold-to-Talk Evaluation:
         # Dictation ONLY occurs while ONLY the clenched left hand is held up (right hand is NOT visible)

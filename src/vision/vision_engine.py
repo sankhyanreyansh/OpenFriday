@@ -264,12 +264,6 @@ class VisionEngine(QThread):
         centroids = [self._compute_palm_centroid(hl) for hl in hands_landmarks]
 
         if hands_count == 1:
-            # If currently in dictation mode, the single active hand is locked as the left hand
-            if hasattr(self, 'gesture_recognizer') and self.gesture_recognizer.is_dictating:
-                self.prev_modifier_centroid = centroids[0]
-                self.prev_dominant_centroid = None
-                return None, hands_landmarks[0]
-
             is_left = False
             if handedness and len(handedness) >= 1:
                 h_class = getattr(handedness[0], "classification", handedness[0])
@@ -277,12 +271,6 @@ class VisionEngine(QThread):
                     label = getattr(h_class[0], "label", getattr(h_class[0], "category_name", ""))
                     if label == target_left_label:
                         is_left = True
-
-            # Centroid persistence fallback for closed fist where handedness classifier can fluctuate
-            if not is_left and self.prev_modifier_centroid is not None:
-                d_prev_left = math.hypot(centroids[0][0] - self.prev_modifier_centroid[0], centroids[0][1] - self.prev_modifier_centroid[1])
-                if d_prev_left < 0.20:
-                    is_left = True
 
             if is_left:
                 self.prev_modifier_centroid = centroids[0]
