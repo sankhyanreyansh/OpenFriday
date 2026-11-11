@@ -53,7 +53,14 @@ def test_click_and_double_click_no_blocking_sleep():
 
 def test_radial_actions_structure():
     """Verify radial menu actions are defined with valid keycodes and labels."""
-    assert len(RADIAL_ACTIONS) >= 4
+    assert len(RADIAL_ACTIONS) >= 7
+    action_ids = {a["id"] for a in RADIAL_ACTIONS}
+    assert "COPY" in action_ids
+    assert "PASTE" in action_ids
+    assert "BACKSPACE" in action_ids
+    assert "ENTER" in action_ids
+    assert "ESCAPE" in action_ids
+
     for action in RADIAL_ACTIONS:
         assert "id" in action
         assert "label" in action

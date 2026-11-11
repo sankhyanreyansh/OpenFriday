@@ -34,6 +34,8 @@ class GestureState(Enum):
     SWIPE_NAV = "SWIPE NAV"
     RADIAL_MENU = "RADIAL MENU"
     ZOOM = "ZOOM"
+    DICTATION_LISTENING = "LISTENING"
+    DICTATION_TRANSCRIBING = "TRANSCRIBING"
 
 
 @dataclass
@@ -56,6 +58,8 @@ class GestureData:
     radial_sector: Optional[str] = None
     drag_start_x: float = 0.0
     drag_start_y: float = 0.0
+    dictation_event: Optional[str] = None
+    is_dictating: bool = False
 
 
 class GestureRecognizer:
@@ -146,6 +150,14 @@ class GestureRecognizer:
         self.prev_dual_pinch_dist: Optional[float] = None
         self.zoom_deadzone: float = 0.015
 
+        # Voice dictation state (Hold-to-Talk)
+        self.is_dictating: bool = False
+        self.fist_last_seen_time: Optional[float] = None
+        self.fist_detected_frames: int = 0
+        self.fist_open_frames: int = 0
+        self.fist_release_grace_period: float = 0.25 # 250ms tracking dropout protection
+        self.voice_dictation_enabled: bool = True
+
     def set_screen_dimensions(self, width: float, height: float):
         """Sets the screen center coordinates for radial wheel calculations."""
         self.screen_center = (width / 2.0, height / 2.0)
@@ -195,7 +207,8 @@ class GestureRecognizer:
             d_tip_mcp = self._euclidean_dist(landmarks[tip_idx], landmarks[mcp_idx])
             d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
             if d_pip_mcp > 0.001:
-                return (d_tip_mcp / d_pip_mcp) > 1.40
+                return (d_tip_mcp / d_pip_mcp) > 1.35
+            return False
         wrist = landmarks[self.WRIST]
         d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
         d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
@@ -210,6 +223,7 @@ class GestureRecognizer:
             d_pip_mcp = self._euclidean_dist(landmarks[pip_idx], landmarks[mcp_idx])
             if d_pip_mcp > 0.001:
                 return (d_tip_mcp / d_pip_mcp) < 1.25
+            return False
         wrist = landmarks[self.WRIST]
         d_tip_wrist = self._euclidean_dist(landmarks[tip_idx], wrist)
         d_pip_wrist = self._euclidean_dist(landmarks[pip_idx], wrist)
@@ -237,6 +251,56 @@ class GestureRecognizer:
             self._is_finger_extended(landmarks, self.RING_TIP, self.RING_PIP, self.RING_MCP) and
             self._is_finger_extended(landmarks, self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP)
         )
+
+    def _is_fist(self, landmarks) -> bool:
+        """
+        Rock-solid rotation- and tilt-invariant clenched fist detection:
+        1. All 4 main fingers (Index, Middle, Ring, Pinky) are curled into the palm:
+           - Fingertip to wrist distance is less than or near PIP/MCP to wrist.
+           - Fingertip to MCP distance is compact relative to palm scale.
+        2. None of the 4 fingers are extended outward away from the hand.
+        3. Thumb is retracted/folded and not extended far away from the hand.
+        """
+        if landmarks is None or len(landmarks) < 21:
+            return False
+
+        palm_scale = self._get_palm_scale(landmarks)
+        wrist = landmarks[self.WRIST]
+
+        finger_indices = [
+            (self.INDEX_TIP, self.INDEX_PIP, self.INDEX_MCP),
+            (self.MIDDLE_TIP, self.MIDDLE_PIP, self.MIDDLE_MCP),
+            (self.RING_TIP, self.RING_PIP, self.RING_MCP),
+            (self.PINKY_TIP, self.PINKY_PIP, self.PINKY_MCP),
+        ]
+
+        curled_count = 0
+        for tip, pip, mcp in finger_indices:
+            d_tip_wrist = self._euclidean_dist(landmarks[tip], wrist)
+            d_pip_wrist = self._euclidean_dist(landmarks[pip], wrist)
+            d_mcp_wrist = self._euclidean_dist(landmarks[mcp], wrist)
+            d_tip_mcp = self._euclidean_dist(landmarks[tip], landmarks[mcp])
+
+            # An extended finger has tip far from MCP and farther from wrist than PIP
+            is_extended = (d_tip_wrist > d_pip_wrist * 1.12) and (d_tip_mcp > palm_scale * 0.70)
+            if is_extended:
+                return False
+
+            # A curled finger has tip close to palm/MCP or closer to wrist than PIP
+            is_curled = (d_tip_wrist <= d_pip_wrist * 1.05) or (d_tip_wrist <= d_mcp_wrist * 1.20) or (d_tip_mcp <= palm_scale * 0.65)
+            if is_curled:
+                curled_count += 1
+
+        if curled_count < 3:
+            return False
+
+        # Thumb check: thumb tip must not be extended far outward
+        d_thumb_wrist = self._euclidean_dist(landmarks[self.THUMB_TIP], wrist)
+        d_thumb_idx_mcp = self._euclidean_dist(landmarks[self.THUMB_TIP], landmarks[self.INDEX_MCP])
+        if d_thumb_wrist > palm_scale * 1.60 and d_thumb_idx_mcp > palm_scale * 1.35:
+            return False
+
+        return True
 
     def is_scrolling_posture(self, landmarks) -> bool:
         """
@@ -687,7 +751,77 @@ class GestureRecognizer:
         if now is None:
             now = time.time()
 
-        is_modifier_active = (left_landmarks is not None and len(left_landmarks) >= 21)
+        has_right_hand = (landmarks is not None and len(landmarks) >= 21)
+        has_left_hand = (left_landmarks is not None and len(left_landmarks) >= 21)
+
+        is_left_fist = (
+            has_left_hand and
+            self._is_fist(left_landmarks)
+        )
+
+        is_left_open = (
+            has_left_hand and
+            self._is_hand_fully_open(left_landmarks)
+        )
+
+        # Modifier is active only if left hand is present AND NOT a clenched fist AND not dictating
+        # Clenched fist is reserved for voice dictation and never triggers scroll, right click, or [SHIFT]
+        is_modifier_active = (
+            has_left_hand and
+            not is_left_fist and
+            not self.is_dictating
+        )
+
+        # 0. Voice Dictation Hold-to-Talk Evaluation:
+        # Dictation ONLY occurs while ONLY the clenched left hand is held up (right hand is NOT visible)
+        dictation_event: Optional[str] = None
+
+        if self.voice_dictation_enabled:
+            if self.is_dictating:
+                # WE ARE CURRENTLY DICTATING (HOLD-TO-TALK LATCH)
+                # Stays locked in listening as long as left hand is raised and right hand is not up
+                if has_right_hand:
+                    # User brought up right hand -> stop dictation immediately
+                    self.is_dictating = False
+                    dictation_event = "STOP"
+                    self.fist_last_seen_time = None
+                    self.fist_detected_frames = 0
+                    self.fist_open_frames = 0
+                elif not has_left_hand:
+                    # Left hand lowered / left the camera view
+                    time_since_seen = now - (self.fist_last_seen_time or now)
+                    if time_since_seen >= self.fist_release_grace_period:
+                        self.is_dictating = False
+                        dictation_event = "STOP"
+                        self.fist_last_seen_time = None
+                        self.fist_detected_frames = 0
+                        self.fist_open_frames = 0
+                elif is_left_open:
+                    # Hand was opened flat into an open palm
+                    self.fist_open_frames += 1
+                    if self.fist_open_frames >= 3:
+                        self.is_dictating = False
+                        dictation_event = "STOP"
+                        self.fist_last_seen_time = None
+                        self.fist_detected_frames = 0
+                        self.fist_open_frames = 0
+                else:
+                    # Left hand is held up, right hand is down -> MAINTAIN DICTATION LATCH
+                    self.fist_last_seen_time = now
+                    self.fist_open_frames = 0
+                    is_modifier_active = False
+            else:
+                # WE ARE NOT CURRENTLY DICTATING
+                # Trigger entry when left fist alone is raised
+                if has_left_hand and not has_right_hand and is_left_fist:
+                    self.fist_detected_frames += 1
+                    self.fist_last_seen_time = now
+                    if self.fist_detected_frames >= 2:
+                        self.is_dictating = True
+                        dictation_event = "START"
+                        is_modifier_active = False
+                else:
+                    self.fist_detected_frames = 0
 
         # 1. Active Radial Menu
         if self.is_radial_active:
@@ -705,6 +839,8 @@ class GestureRecognizer:
                 is_modifier_active=is_modifier_active,
                 nav_action=nav_act,
                 radial_sector=sec,
+                dictation_event=dictation_event,
+                is_dictating=self.is_dictating,
             )
 
         # 2. Dual Open Palms (Summon Radial Menu)
@@ -722,21 +858,42 @@ class GestureRecognizer:
                 is_modifier_active=is_modifier_active,
                 nav_action=nav_act,
                 radial_sector=sec,
+                dictation_event=dictation_event,
+                is_dictating=self.is_dictating,
             )
 
-        # If right hand is not visible, return idle tracking
+        # If right hand is not visible, check dictation or return idle tracking
         if landmarks is None or len(landmarks) < 21:
             self.cancel_momentum_scroll()
             self.is_pinching = False
             self.is_dragging = False
-            status = "[SHIFT] Ready (Show Right Hand)" if is_modifier_active else "Searching for Right Hand..."
+
+            if dictation_event == "STOP":
+                state = GestureState.DICTATION_TRANSCRIBING
+                status = "Transcribing..."
+                tracking = True
+            elif self.is_dictating:
+                state = GestureState.DICTATION_LISTENING
+                status = "Listening..."
+                tracking = True
+            elif is_modifier_active:
+                state = GestureState.NONE
+                status = "[SHIFT] Ready (Show Right Hand)"
+                tracking = False
+            else:
+                state = GestureState.NONE
+                status = "Searching for Right Hand..."
+                tracking = False
+
             return GestureData(
                 screen_x=screen_pos[0],
                 screen_y=screen_pos[1],
-                state=GestureState.NONE,
-                is_tracking=False,
+                state=state,
+                is_tracking=tracking,
                 status_message=status,
                 is_modifier_active=is_modifier_active,
+                dictation_event=dictation_event,
+                is_dictating=self.is_dictating,
             )
 
         sx, sy = screen_pos
@@ -757,6 +914,8 @@ class GestureRecognizer:
                     status_message=status,
                     is_modifier_active=is_modifier_active,
                     nav_action=nav_action,
+                    dictation_event=dictation_event,
+                    is_dictating=self.is_dictating,
                 )
         else:
             self.is_in_swipe_mode = False
@@ -778,6 +937,8 @@ class GestureRecognizer:
                 is_tracking=True,
                 status_message=status,
                 is_modifier_active=is_modifier_active,
+                dictation_event=dictation_event,
+                is_dictating=self.is_dictating,
             )
 
         # 5. Pointer Navigation & Pinch Clicks / Instant Dragging
@@ -875,4 +1036,6 @@ class GestureRecognizer:
             is_modifier_active=is_modifier_active,
             drag_start_x=self.pinch_freeze_x,
             drag_start_y=self.pinch_freeze_y,
+            dictation_event=dictation_event,
+            is_dictating=self.is_dictating,
         )

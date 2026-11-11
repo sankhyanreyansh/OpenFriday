@@ -126,13 +126,13 @@ class GlassmorphicStatusPill(QWidget):
         p_layout.setSpacing(8)
         p_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.pill_status_lbl = QLabel("● POINTING")
+        self.pill_status_lbl = QLabel("POINTING")
         self.pill_status_lbl.setObjectName("statusLabel")
         p_layout.addWidget(self.pill_status_lbl)
 
         p_layout.addStretch()
 
-        self.mini_pause_btn = QPushButton("⏸")
+        self.mini_pause_btn = QPushButton("||")
         self.mini_pause_btn.setObjectName("iconBtn")
         self.mini_pause_btn.setToolTip("Pause / Resume Tracking")
         self.mini_pause_btn.clicked.connect(self.on_master_toggle)
@@ -143,11 +143,11 @@ class GlassmorphicStatusPill(QWidget):
     def on_master_toggle(self):
         self.is_tracking_active = not self.is_tracking_active
         if self.is_tracking_active:
-            self.mini_pause_btn.setText("⏸")
-            self._update_label("● READY", "#E4E4E7")
+            self.mini_pause_btn.setText("||")
+            self._update_label("READY", "#E4E4E7")
         else:
-            self.mini_pause_btn.setText("▶")
-            self._update_label("● PAUSED", "#71717A")
+            self.mini_pause_btn.setText(">")
+            self._update_label("PAUSED", "#71717A")
 
         self.master_toggle_requested.emit(self.is_tracking_active)
 
@@ -156,8 +156,17 @@ class GlassmorphicStatusPill(QWidget):
         if not self.is_tracking_active:
             return
         msg_upper = message.upper()
-        color = "#F87171" if ("ERROR" in msg_upper or "FAILED" in msg_upper) else "#A1A1AA"
-        self._update_label(f"● {msg_upper}", color)
+        if "DICTATED" in msg_upper:
+            color = "#34D399"
+        elif "LISTENING" in msg_upper:
+            color = "#F87171"
+        elif "TRANSCRIBING" in msg_upper:
+            color = "#60A5FA"
+        elif "ERROR" in msg_upper or "FAILED" in msg_upper:
+            color = "#F87171"
+        else:
+            color = "#A1A1AA"
+        self._update_label(msg_upper, color)
 
     def _update_label(self, text: str, color: str):
         """Applies label text and styling with dirty checks to avoid redundant Qt re-styling."""
@@ -177,37 +186,53 @@ class GlassmorphicStatusPill(QWidget):
         state = data.state
         state_text = state.value
 
-        if state == GestureState.RADIAL_MENU:
+        if state == GestureState.DICTATION_LISTENING or data.is_dictating:
+            display_text = "LISTENING..."
+            color = "#F87171"
+        elif state == GestureState.DICTATION_TRANSCRIBING:
+            display_text = "TRANSCRIBING..."
+            color = "#60A5FA"
+        elif state == GestureState.RADIAL_MENU:
             if data.nav_action:
-                display_text = f"● {data.nav_action}"
+                display_text = data.nav_action
             elif data.radial_sector:
-                display_text = f"● {data.radial_sector}"
+                display_text = data.radial_sector
             else:
-                display_text = "● RADIAL MENU"
+                display_text = "RADIAL MENU"
+            color = "#E4E4E7"
         elif state == GestureState.ZOOM:
-            display_text = f"● {data.status_message}" if data.status_message else "● ZOOM"
+            display_text = data.status_message.upper() if data.status_message else "ZOOM"
+            color = "#E4E4E7"
         elif state == GestureState.SWIPE_NAV:
             if data.nav_action == "MISSION_CONTROL":
-                display_text = "● MISSION CONTROL"
+                display_text = "MISSION CONTROL"
             elif data.nav_action == "APP_EXPOSE":
-                display_text = "● APP EXPOSÉ"
+                display_text = "APP EXPOSÉ"
             elif data.nav_action == "SPACE_LEFT":
-                display_text = "● SPACE LEFT"
+                display_text = "SPACE LEFT"
             elif data.nav_action == "SPACE_RIGHT":
-                display_text = "● SPACE RIGHT"
+                display_text = "SPACE RIGHT"
             else:
-                display_text = "● 3-FINGER SWIPE"
-        elif data.is_modifier_active:
-            display_text = f"● [SHIFT] {state_text}"
-        else:
-            display_text = f"● {state_text}"
-
-        if state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK, GestureState.SWIPE_NAV, GestureState.RADIAL_MENU, GestureState.ZOOM):
+                display_text = "3-FINGER SWIPE"
             color = "#E4E4E7"
-        elif state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.SCROLLING):
+        elif state == GestureState.NONE:
+            if data.is_modifier_active:
+                display_text = "[SHIFT] READY"
+                color = "#D4D4D8"
+            else:
+                display_text = "SEARCHING..."
+                color = "#71717A"
+        elif data.is_modifier_active:
+            display_text = f"[SHIFT] {state_text}"
             color = "#D4D4D8"
         else:
-            color = "#A1A1AA"
+            display_text = state_text
+            if state in (GestureState.CLICK, GestureState.DOUBLE_CLICK, GestureState.RIGHT_CLICK):
+                color = "#E4E4E7"
+            elif state in (GestureState.DRAGGING, GestureState.PINCHING, GestureState.SCROLLING):
+                color = "#D4D4D8"
+            else:
+                color = "#A1A1AA"
 
         self._update_label(display_text, color)
 

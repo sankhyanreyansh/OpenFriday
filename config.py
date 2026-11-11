@@ -32,6 +32,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # HUD Overlays
     "show_reticle": True,
     "show_pinch_meter": True,
+
+    # Voice Dictation & Speech-to-Text
+    "voice_dictation_enabled": True,
+    "whisper_model": "base.en",
+    "mic_device": None,   # None = auto-select active macOS default mic (AirPods, Galaxy Buds, etc.)
 }
 
 

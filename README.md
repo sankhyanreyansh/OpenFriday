@@ -19,6 +19,7 @@ FRIDAY uses a **Dual-Hand Asymmetric Architecture**:
 | **Left Hand Raised + Pinch** | Both Hands | Right Click | Secondary click |
 | **Left Hand Raised + 2 Fingers** | Both Hands | Continuous Inertial Scroll | Two-finger scroll |
 | **Dual Pinch + Spread/Pinch** | Both Hands | Spatial Zoom In / Out | `⌘ +` / `⌘ -` |
+| **Clenched Left Fist Alone (Hold)** | Left Hand Alone | Hold-to-Talk Speech Dictation | Record while held, paste on release |
 | **3-Finger Flick Left / Right** | Right Hand | Switch Desktop Spaces | `Ctrl + ➔` / `Ctrl + ⬅` |
 | **3-Finger Flick Up / Down** | Right Hand | Mission Control / App Exposé | `Ctrl + ⬆` / `Ctrl + ⬇` |
 | **Dual Open Palms (Hold 250ms)**| Both Hands | Summon Radial Shortcut Wheel | Modal shortcut menu |
@@ -33,6 +34,7 @@ FRIDAY uses a **Dual-Hand Asymmetric Architecture**:
 * **Apex Inflection Swipe Engine**: Rapid successive 3-finger space flicks (e.g. Left $\rightarrow$ Left $\rightarrow$ Left) are evaluated from the motion turnaround point (apex), completely eliminating history dilution while suppressing opposite recoil bounce-back.
 * **1€ Dynamic Velocity Filtering**: Adaptive cutoff filtering ensures rock-solid stationary pointing jitter reduction with zero lag during high-speed flicks.
 * **Glassmorphic Status Pill**: Real-time status indicator floating in the top right of the desktop with dirty-state styling optimizations to avoid Qt stylesheet re-parsing.
+* **Local Whisper Voice Dictation**: Raise clenched left fist alone to dictate; speak for as long as your fist is held up, and drop your hand to automatically transcribe locally via `faster-whisper` (INT8) and paste directly into any active input box with trailing space and automatic clipboard restoration.
 
 ---
 
@@ -76,10 +78,13 @@ To customize the shortcuts in the radial wheel, edit `RADIAL_ACTIONS` in [`src/c
 
 ```python
 RADIAL_ACTIONS = [
-    {"id": "NEW_TAB",   "label": "NEW TAB",   "symbol": "⌘T", "key_code": 17, "flags": "command"},
+    {"id": "COPY",      "label": "COPY",      "symbol": "⌘C", "key_code": 8,  "flags": "command"},
+    {"id": "PASTE",     "label": "PASTE",     "symbol": "⌘V", "key_code": 9,  "flags": "command"},
+    {"id": "BACKSPACE", "label": "BACKSPACE", "symbol": "⌫",  "key_code": 51, "flags": None},
     {"id": "ENTER",     "label": "ENTER",     "symbol": "↵",  "key_code": 36, "flags": None},
-    {"id": "CLOSE_TAB", "label": "CLOSE TAB", "symbol": "⌘W", "key_code": 13, "flags": "command"},
     {"id": "ESCAPE",    "label": "ESCAPE",    "symbol": "⎋",  "key_code": 53, "flags": None},
+    {"id": "NEW_TAB",   "label": "NEW TAB",   "symbol": "⌘T", "key_code": 17, "flags": "command"},
+    {"id": "CLOSE_TAB", "label": "CLOSE TAB", "symbol": "⌘W", "key_code": 13, "flags": "command"},
 ]
 ```
 The UI overlay dynamically calculates slice angles and hit detection for any number of actions.

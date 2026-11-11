@@ -62,6 +62,14 @@ def open_camera_settings():
         print(f"Error opening camera settings: {e}")
 
 
+def open_microphone_settings():
+    """Opens macOS System Settings -> Privacy & Security -> Microphone."""
+    try:
+        subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"])
+    except Exception as e:
+        print(f"Error opening microphone settings: {e}")
+
+
 def check_camera_access(camera_id: int = 0) -> Tuple[bool, str]:
     """
     Tests if the specified camera can be opened locally.

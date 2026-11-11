@@ -55,7 +55,7 @@ def main():
             permissions.request_accessibility_permission()
             permissions.open_accessibility_settings()
             print("\n" + "=" * 65)
-            print("⚠️  [PERMISSION REQUIRED] macOS Accessibility Permission Missing")
+            print("[PERMISSION REQUIRED] macOS Accessibility Permission Missing")
             print("   Open FRIDAY needs Accessibility access to move cursor & click.")
             print("   Opened System Settings -> Privacy & Security -> Accessibility.")
             print("   Please grant permission and relaunch Open FRIDAY.")

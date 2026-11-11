@@ -16,8 +16,15 @@ except ImportError:
 logger = logging.getLogger("OpenFriday.Keystrokes")
 
 # Common Virtual Keycodes for macOS
+KEY_C = 8             # Key 'c' on ANSI keyboard (Cmd+C copy)
+KEY_V = 9             # Key 'v' on ANSI keyboard (Cmd+V paste)
+KEY_W = 13            # Key 'w' on ANSI keyboard (Cmd+W close tab)
+KEY_T = 17            # Key 't' on ANSI keyboard (Cmd+T new tab)
 KEY_PLUS = 0x18       # Key '=' / '+' on ANSI keyboard
 KEY_MINUS = 0x1B      # Key '-' on ANSI keyboard
+KEY_RETURN = 36       # Key 'Return' / Enter on ANSI keyboard
+KEY_DELETE = 51       # Key 'Delete' / Backspace on ANSI keyboard
+KEY_ESCAPE = 53       # Key 'Escape' on ANSI keyboard
 KEY_LEFT_ARROW = 123
 KEY_RIGHT_ARROW = 124
 KEY_DOWN_ARROW = 125

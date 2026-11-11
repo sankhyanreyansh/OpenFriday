@@ -92,3 +92,18 @@ def test_classify_dual_hands_and_centroid_persistence():
     assert right2 is moved_dom, "Centroid tracking must keep dominant hand identity"
     assert left2 is moved_mod, "Centroid tracking must keep modifier hand identity"
 
+
+def test_classify_single_hand_locked_during_dictation():
+    """Verify that during active dictation, a single hand cannot be flipped to right hand by classification noise."""
+    ctrl = MouseController()
+    engine = VisionEngine(camera_id=0, mouse_controller=ctrl)
+    engine.mirror_horizontal = True
+
+    hand = create_hand(0.25, 0.5)
+    engine.gesture_recognizer.is_dictating = True
+
+    # Even if noisy MediaPipe handedness falsely reports dominant label ("Left")
+    right, left = engine._classify_hands([hand], [MockHandedness("Left")])
+    assert right is None, "Active dictation hand must never be flipped into a right hand"
+    assert left is hand, "Single hand must remain locked as left modifier hand during dictation"
+

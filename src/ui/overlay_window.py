@@ -97,6 +97,7 @@ class TransparentOverlay(QWidget):
         self.pinch_progress = 0.0
         self.is_modifier_active = False
         self.active_radial_sector: Optional[str] = None
+        self.is_dictating = False
 
         # Settings
         self.show_reticle = True
@@ -132,11 +133,13 @@ class TransparentOverlay(QWidget):
             abs(self.cursor_x - data.screen_x) > 0.5 or
             abs(self.cursor_y - data.screen_y) > 0.5
         )
+        is_dictating = getattr(data, "is_dictating", False)
         state_changed = (
             self.current_state != data.state or
             self.is_tracking != data.is_tracking or
             self.is_modifier_active != data.is_modifier_active or
             self.active_radial_sector != data.radial_sector or
+            self.is_dictating != is_dictating or
             abs(self.pinch_progress - data.pinch_progress) > 0.02
         )
         if coords_changed or state_changed:
@@ -149,6 +152,7 @@ class TransparentOverlay(QWidget):
         self.pinch_progress = data.pinch_progress
         self.is_modifier_active = data.is_modifier_active
         self.active_radial_sector = data.radial_sector
+        self.is_dictating = is_dictating
 
         # Trigger ripples on click transitions
         if self.current_state != self.prev_state:
@@ -269,16 +273,16 @@ class TransparentOverlay(QWidget):
 
             # Symbol
             painter.setPen(sym_color)
-            sym_font = QFont("Helvetica Neue", 16, QFont.Weight.Bold if is_active else QFont.Weight.Medium)
+            sym_font = QFont("Helvetica Neue", 15, QFont.Weight.Bold if is_active else QFont.Weight.Medium)
             painter.setFont(sym_font)
-            painter.drawText(QRectF(tx - 40, ty - 20, 80, 22), Qt.AlignmentFlag.AlignCenter, symbol)
+            painter.drawText(QRectF(tx - 40, ty - 22, 80, 22), Qt.AlignmentFlag.AlignCenter, symbol)
 
             # Label
             painter.setPen(lbl_color)
-            lbl_font = QFont("Helvetica Neue", 10, QFont.Weight.DemiBold if is_active else QFont.Weight.Normal)
-            lbl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.6)
+            lbl_font = QFont("Helvetica Neue", 9, QFont.Weight.DemiBold if is_active else QFont.Weight.Normal)
+            lbl_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
             painter.setFont(lbl_font)
-            painter.drawText(QRectF(tx - 50, ty + 2, 100, 18), Qt.AlignmentFlag.AlignCenter, label)
+            painter.drawText(QRectF(tx - 45, ty + 2, 90, 18), Qt.AlignmentFlag.AlignCenter, label)
 
         # 4. Center Hub
         painter.setBrush(QBrush(QColor(14, 16, 22, 245)))
@@ -377,3 +381,11 @@ class TransparentOverlay(QWidget):
                 90 * 16,
                 -int(pinch * 360) * 16,
             )
+
+        # Dictation recording indicator badge
+        if self.is_dictating:
+            mic_dot_x = cx + r + 5.0
+            mic_dot_y = cy - r
+            painter.setBrush(QBrush(QColor(239, 68, 68, 230)))
+            painter.setPen(QPen(QColor(255, 255, 255, 200), 1.0))
+            painter.drawEllipse(QPointF(mic_dot_x, mic_dot_y), 3.5, 3.5)

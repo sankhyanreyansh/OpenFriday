@@ -348,3 +348,155 @@ def test_drag_release_returning_to_origin():
     assert res_rel.state != GestureState.DOUBLE_CLICK, "Bug: returning to origin triggered Double Click!"
     assert res_rel.state == GestureState.POINTING
     assert res_rel.status_message == "Drag Released"
+
+
+def create_fist_hand():
+    """Generates 21 landmarks for a clenched fist (all fingers curled, thumb folded)."""
+    lms = [MockLandmark(0.5, 0.7, 0.0)] * 21
+    lms[0] = MockLandmark(0.5, 0.7, 0.0)  # WRIST
+
+    # Thumb (folded across palm)
+    lms[1] = MockLandmark(0.47, 0.65)
+    lms[2] = MockLandmark(0.48, 0.62)
+    lms[3] = MockLandmark(0.49, 0.60)
+    lms[4] = MockLandmark(0.50, 0.58)
+
+    # Index (curled)
+    lms[5] = MockLandmark(0.48, 0.58)
+    lms[6] = MockLandmark(0.48, 0.52)
+    lms[7] = MockLandmark(0.48, 0.56)
+    lms[8] = MockLandmark(0.48, 0.62)
+
+    # Middle (curled)
+    lms[9] = MockLandmark(0.52, 0.58)
+    lms[10] = MockLandmark(0.52, 0.52)
+    lms[11] = MockLandmark(0.52, 0.56)
+    lms[12] = MockLandmark(0.52, 0.62)
+
+    # Ring (curled)
+    lms[13] = MockLandmark(0.55, 0.59)
+    lms[14] = MockLandmark(0.55, 0.53)
+    lms[15] = MockLandmark(0.55, 0.57)
+    lms[16] = MockLandmark(0.55, 0.63)
+
+    # Pinky (curled)
+    lms[17] = MockLandmark(0.58, 0.61)
+    lms[18] = MockLandmark(0.58, 0.55)
+    lms[19] = MockLandmark(0.58, 0.59)
+    lms[20] = MockLandmark(0.58, 0.64)
+    return lms
+
+
+def test_left_fist_hold_to_talk_workflow():
+    """Verify hold-to-talk: listening starts when left fist is held, and stops when released."""
+    gr = GestureRecognizer()
+    fist = create_fist_hand()
+    t = 10.0
+
+    # 1. Raise left fist alone: after >80ms, starts listening
+    start_triggered = False
+    for _ in range(10):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=fist, now=t)
+        if res.dictation_event == "START":
+            start_triggered = True
+
+    assert start_triggered is True, "Left fist alone failed to trigger dictation START"
+    assert gr.is_dictating is True
+    assert res.state == GestureState.DICTATION_LISTENING
+    assert res.status_message == "Listening..."
+
+    # 2. Keep holding left fist while speaking: stays in DICTATION_LISTENING
+    for _ in range(25):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=fist, now=t)
+        assert res.state == GestureState.DICTATION_LISTENING
+        assert res.status_message == "Listening..."
+        assert gr.is_dictating is True
+
+    # 3. Drop hand: after release grace period (250ms), triggers STOP
+    stop_triggered = False
+    stop_state = None
+    stop_status = None
+    for _ in range(25):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=None, now=t)
+        if res.dictation_event == "STOP":
+            stop_triggered = True
+            stop_state = res.state
+            stop_status = res.status_message
+
+    assert stop_triggered is True, "Releasing left fist failed to trigger dictation STOP"
+    assert stop_state == GestureState.DICTATION_TRANSCRIBING
+    assert stop_status == "Transcribing..."
+    assert gr.is_dictating is False
+
+
+def test_dictation_latch_no_shift_flicker():
+    """Verify that once dictation starts, tracking noise never causes it to flicker into [SHIFT] READY."""
+    gr = GestureRecognizer()
+    fist = create_fist_hand()
+    t = 100.0
+
+    # Start dictation
+    for _ in range(5):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=fist, now=t)
+
+    assert gr.is_dictating is True
+    assert res.state == GestureState.DICTATION_LISTENING
+
+    # Wiggle landmarks: simulate slight hand rotation / noise while holding fist
+    noisy_fist = create_fist_hand()
+    noisy_fist[8] = MockLandmark(0.48, 0.58)  # Index tip moves slightly
+    noisy_fist[4] = MockLandmark(0.47, 0.53)  # Thumb moves slightly
+
+    for _ in range(30):
+        t += 0.016
+        res = gr.process(None, (0.0, 0.0), left_landmarks=noisy_fist, now=t)
+        # CRUCIAL: Must NEVER switch to [SHIFT] READY while left hand remains raised
+        assert res.state == GestureState.DICTATION_LISTENING, f"State glitched to {res.state}"
+        assert res.status_message == "Listening...", f"Status glitched to {res.status_message}"
+        assert res.is_modifier_active is False, "Modifier mode must remain strictly suppressed during dictation"
+
+
+def test_right_hand_up_prevents_dictation_toggle():
+    """Verify dictation NEVER fires if right hand is also up."""
+    gr = GestureRecognizer()
+    fist = create_fist_hand()
+    pointing = create_pointing_hand()
+    t = 20.0
+
+    # Right hand is visible (e.g. pointing or moving) while left hand makes fist
+    for _ in range(30):
+        t += 0.016
+        res = gr.process(pointing, (200.0, 200.0), left_landmarks=fist, now=t)
+        assert res.dictation_event is None, "Dictation must NOT trigger when right hand is also up!"
+
+    assert gr.is_dictating is False, "Dictation was incorrectly activated with both hands up!"
+    # Ensure clenched fist does NOT trigger modifier mode (scroll/right-click)
+    assert res.is_modifier_active is False, "Clenched fist should not be treated as a scroll/shift modifier"
+
+
+def test_radial_menu_selection_copy_paste_backspace():
+    """Verify radial menu sectors map correctly to COPY, PASTE, and BACKSPACE."""
+    gr = GestureRecognizer()
+    gr.set_screen_dimensions(1000.0, 1000.0)
+    gr.is_radial_active = True
+    pointing = create_pointing_hand()
+    cx, cy = 500.0, 500.0
+
+    # Sector 0: Angle 0 deg (East, x = cx + 100, y = cy) -> COPY
+    res_copy = gr.process(pointing, (cx + 100.0, cy), now=10.0)
+    assert res_copy.state == GestureState.RADIAL_MENU
+    assert res_copy.radial_sector == "COPY"
+
+    # Sector 1: Angle ~51 deg (East-North-East, x = cx + 80, y = cy - 65) -> PASTE
+    res_paste = gr.process(pointing, (cx + 80.0, cy - 65.0), now=10.1)
+    assert res_paste.state == GestureState.RADIAL_MENU
+    assert res_paste.radial_sector == "PASTE"
+
+    # Sector 2: Angle ~103 deg (North, x = cx - 20, y = cy - 100) -> BACKSPACE
+    res_bs = gr.process(pointing, (cx - 20.0, cy - 100.0), now=10.2)
+    assert res_bs.state == GestureState.RADIAL_MENU
+    assert res_bs.radial_sector == "BACKSPACE"

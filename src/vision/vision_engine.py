@@ -21,6 +21,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from src.control.mouse_controller import MouseController
 from src.control import permissions
+from src.audio.voice_transcriber import VoiceTranscriber
 from src.vision.gesture_recognizer import (
     GestureRecognizer,
     GestureState,
@@ -156,6 +157,10 @@ class VisionEngine(QThread):
         self.prev_dominant_centroid: Optional[Tuple[float, float]] = None
         self.prev_modifier_centroid: Optional[Tuple[float, float]] = None
 
+        # Voice Dictation Service
+        self.voice_transcriber = VoiceTranscriber(model_name="base.en", mic_device=None)
+        self.voice_transcriber.start_background_model_preload()
+
     def update_settings(self, settings: dict):
         """Applies dynamic runtime configuration updates."""
         if "tracking_enabled" in settings:
@@ -174,10 +179,31 @@ class VisionEngine(QThread):
             self.gesture_recognizer.pinch_start_threshold = float(settings["pinch_start_threshold"])
         if "pinch_release_threshold" in settings:
             self.gesture_recognizer.pinch_release_threshold = float(settings["pinch_release_threshold"])
+        if "voice_dictation_enabled" in settings:
+            self.gesture_recognizer.voice_dictation_enabled = bool(settings["voice_dictation_enabled"])
+        if "whisper_model" in settings:
+            self.voice_transcriber.model_name = str(settings["whisper_model"])
+        if "mic_device" in settings:
+            self.voice_transcriber.mic_device = settings["mic_device"]
 
         min_cutoff = float(settings.get("min_cutoff", 1.0))
         beta = float(settings.get("beta", 0.025))
         self.cursor_smoother.update_params(min_cutoff=min_cutoff, beta=beta, d_cutoff=1.5)
+
+    def _dispatch_transcription(self, audio: np.ndarray):
+        """Asynchronously runs local transcription and clipboard paste in background worker."""
+        def _on_completed(text: str):
+            preview = text[:26] + ("..." if len(text) > 26 else "")
+            self.status_changed.emit(f"Dictated: {preview}")
+
+        def _on_failed(err: str):
+            self.status_changed.emit(f"Dictation: {err}")
+
+        self.voice_transcriber.start_transcription_worker(
+            audio,
+            on_completed=_on_completed,
+            on_failed=_on_failed
+        )
 
     def dismiss_radial_menu(self):
         """Manually dismisses the radial shortcut wheel."""
@@ -186,6 +212,8 @@ class VisionEngine(QThread):
     def stop(self):
         """Signals vision loop to stop and waits for thread completion."""
         self.running = False
+        if hasattr(self, 'voice_transcriber') and self.voice_transcriber:
+            self.voice_transcriber.stop_recording()
         self.wait(1500)
 
     def _map_to_screen(self, norm_x: float, norm_y: float) -> Tuple[float, float]:
@@ -236,6 +264,12 @@ class VisionEngine(QThread):
         centroids = [self._compute_palm_centroid(hl) for hl in hands_landmarks]
 
         if hands_count == 1:
+            # If currently in dictation mode, the single active hand is locked as the left hand
+            if hasattr(self, 'gesture_recognizer') and self.gesture_recognizer.is_dictating:
+                self.prev_modifier_centroid = centroids[0]
+                self.prev_dominant_centroid = None
+                return None, hands_landmarks[0]
+
             is_left = False
             if handedness and len(handedness) >= 1:
                 h_class = getattr(handedness[0], "classification", handedness[0])
@@ -243,6 +277,12 @@ class VisionEngine(QThread):
                     label = getattr(h_class[0], "label", getattr(h_class[0], "category_name", ""))
                     if label == target_left_label:
                         is_left = True
+
+            # Centroid persistence fallback for closed fist where handedness classifier can fluctuate
+            if not is_left and self.prev_modifier_centroid is not None:
+                d_prev_left = math.hypot(centroids[0][0] - self.prev_modifier_centroid[0], centroids[0][1] - self.prev_modifier_centroid[1])
+                if d_prev_left < 0.20:
+                    is_left = True
 
             if is_left:
                 self.prev_modifier_centroid = centroids[0]
@@ -445,6 +485,17 @@ class VisionEngine(QThread):
                         now=now,
                     )
                     gesture_data.fps = fps_smoothing
+
+                # Voice Dictation Trigger Handling
+                if gesture_data.dictation_event == "START":
+                    ok = self.voice_transcriber.start_recording()
+                    if ok:
+                        self.status_changed.emit("Listening...")
+                elif gesture_data.dictation_event == "STOP":
+                    audio = self.voice_transcriber.stop_recording()
+                    if audio is not None:
+                        self.status_changed.emit("Transcribing...")
+                        self._dispatch_transcription(audio)
 
                 self.gesture_updated.emit(gesture_data)
                 self.fps_updated.emit(fps_smoothing)

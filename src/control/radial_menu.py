@@ -8,7 +8,16 @@ All shortcuts are dispatched natively via macOS Quartz CoreGraphics with zero su
 
 from typing import List, Dict, Any, Optional
 
-from src.control.keystrokes import post_keyboard_event
+from src.control.keystrokes import (
+    post_keyboard_event,
+    KEY_C,
+    KEY_V,
+    KEY_DELETE,
+    KEY_RETURN,
+    KEY_ESCAPE,
+    KEY_T,
+    KEY_W,
+)
 
 try:
     import Quartz.CoreGraphics as CG
@@ -19,32 +28,53 @@ except ImportError:
 
 RADIAL_ACTIONS: List[Dict[str, Any]] = [
     {
-        "id": "NEW_TAB",
-        "label": "NEW TAB",
-        "symbol": "⌘T",
-        "key_code": 17,       # Virtual keycode for 't'
+        "id": "COPY",
+        "label": "COPY",
+        "symbol": "⌘C",
+        "key_code": KEY_C,           # Virtual keycode 8
         "flags": "command",
+    },
+    {
+        "id": "PASTE",
+        "label": "PASTE",
+        "symbol": "⌘V",
+        "key_code": KEY_V,           # Virtual keycode 9
+        "flags": "command",
+    },
+    {
+        "id": "BACKSPACE",
+        "label": "BACKSPACE",
+        "symbol": "⌫",
+        "key_code": KEY_DELETE,      # Virtual keycode 51
+        "flags": None,
     },
     {
         "id": "ENTER",
         "label": "ENTER",
         "symbol": "↵",
-        "key_code": 36,       # Virtual keycode for Return / Enter
+        "key_code": KEY_RETURN,      # Virtual keycode 36
         "flags": None,
-    },
-    {
-        "id": "CLOSE_TAB",
-        "label": "CLOSE TAB",
-        "symbol": "⌘W",
-        "key_code": 13,       # Virtual keycode for 'w'
-        "flags": "command",
     },
     {
         "id": "ESCAPE",
         "label": "ESCAPE",
         "symbol": "⎋",
-        "key_code": 53,       # Virtual keycode for Escape
+        "key_code": KEY_ESCAPE,      # Virtual keycode 53
         "flags": None,
+    },
+    {
+        "id": "NEW_TAB",
+        "label": "NEW TAB",
+        "symbol": "⌘T",
+        "key_code": KEY_T,           # Virtual keycode 17
+        "flags": "command",
+    },
+    {
+        "id": "CLOSE_TAB",
+        "label": "CLOSE TAB",
+        "symbol": "⌘W",
+        "key_code": KEY_W,           # Virtual keycode 13
+        "flags": "command",
     },
 ]
 
