@@ -25,7 +25,7 @@ fi
 
 # Ensure all dependencies are satisfied
 if [ ! -f "$VENV_PATH/bin/python" ]; then
-    echo "❌ Error: Python binary not found in $VENV_PATH"
+    echo "Error: Python binary not found in $VENV_PATH"
     exit 1
 fi
 
